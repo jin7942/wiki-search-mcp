@@ -1,0 +1,15 @@
+# Docker 빌드 컨텍스트 최소화
+# 단, .git은 hatch-vcs 버전 감지를 위해 제외하지 않음
+.venv/
+.vectordb/
+**/.vectordb/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.claude/
+.claude-log/
+dist/
+build/
+*.egg-info/
+wiki/.vectordb/

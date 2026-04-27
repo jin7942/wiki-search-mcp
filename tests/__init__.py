@@ -1,0 +1,1 @@
+"""Wiki Search MCP Tests"""
