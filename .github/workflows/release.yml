@@ -1,0 +1,56 @@
+# GitHub Release 자동 생성 워크플로우
+#
+# 트리거: vX.Y.Z 형식 tag push
+# 동작: CHANGELOG의 [Unreleased] 또는 해당 버전 섹션을 추출해 Release 본문으로 사용
+
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write  # Release 생성용
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # [Unreleased] 또는 [vX.Y.Z] 섹션 추출
+          # 다음 ## 섹션 또는 EOF 전까지
+          awk -v v="$VERSION" '
+            /^## / {
+              if (capture) exit
+              if ($0 ~ /\[Unreleased\]/ || $0 ~ "\\[" v "\\]" || $0 ~ "\\[v?" v "\\]") {
+                capture = 1
+                next
+              }
+            }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "Release notes for $VERSION not found in CHANGELOG.md" >&2
+            echo "Using default message"
+            echo "Release $VERSION" > release-notes.md
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ steps.notes.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
