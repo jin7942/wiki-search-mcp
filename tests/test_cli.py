@@ -1,7 +1,8 @@
 """CLI 명령어 테스트.
 
-config, index 명령어를 테스트합니다. ``init`` 명령은 zero-config
-전환에 따라 제거되었습니다.
+config, index, serve 명령어를 테스트합니다. ``init`` 명령은 zero-config
+전환에 따라 제거되었습니다. 환경변수도 모두 제거되었으며 모든 설정은
+CLI 위치 인자/옵션으로 전달됩니다.
 """
 
 import json
@@ -27,17 +28,14 @@ class TestConfigCommand:
     """config 명령어 테스트."""
 
     def test_config_creates_mcp_config(self):
-        """MCP 설정 생성."""
+        """MCP 설정 생성: env 없이 args에 path 직렬화."""
         from wiki_search_mcp.adapters.cli.main import main
 
         runner = CliRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # wiki 디렉토리 생성
             wiki_path = Path(tmpdir) / "wiki"
             wiki_path.mkdir()
-
-            # 설정 파일 경로
             config_file = Path(tmpdir) / "claude_config.json"
 
             result = runner.invoke(
@@ -45,17 +43,104 @@ class TestConfigCommand:
                 ["config", str(wiki_path), "--config-path", str(config_file)],
             )
 
-            assert result.exit_code == 0
+            assert result.exit_code == 0, result.output
             assert config_file.exists()
 
-            # 설정 내용 확인
             config_data = json.loads(config_file.read_text())
-            assert "mcpServers" in config_data
-            assert "wiki-search" in config_data["mcpServers"]
-            # macOS에서 /var -> /private/var 심볼릭 링크 고려
-            saved_path = config_data["mcpServers"]["wiki-search"]["env"]["WIKI_PATH"]
-            assert saved_path.endswith("/wiki")
-            assert "wiki" in saved_path
+            server = config_data["mcpServers"]["wiki-search"]
+
+            # 환경변수 사용 안 함
+            assert "env" not in server
+            # args = ["serve", "/abs/path"]
+            assert server["args"][0] == "serve"
+            assert server["args"][1].endswith("/wiki")
+            assert "wiki" in server["args"][1]
+            # 비-기본값 옵션이 없으면 추가 args 없음
+            assert len(server["args"]) == 2
+
+    def test_config_serializes_options_to_args(self):
+        """추가 옵션은 args에 직렬화."""
+        from wiki_search_mcp.adapters.cli.main import main
+
+        runner = CliRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wiki_path = Path(tmpdir) / "wiki"
+            wiki_path.mkdir()
+            config_file = Path(tmpdir) / "claude_config.json"
+
+            result = runner.invoke(
+                main,
+                [
+                    "config",
+                    str(wiki_path),
+                    "--config-path",
+                    str(config_file),
+                    "--model",
+                    "fast",
+                    "--no-watch",
+                    "--ignore",
+                    "draft",
+                    "--ignore",
+                    "*.bak",
+                    "--debounce",
+                    "5.0",
+                    "--log-level",
+                    "DEBUG",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+
+            config_data = json.loads(config_file.read_text())
+            args = config_data["mcpServers"]["wiki-search"]["args"]
+
+            assert args[0] == "serve"
+            assert args[1].endswith("/wiki")
+            # 옵션 직렬화 검증
+            assert "--model" in args
+            assert "fast" in args
+            assert "--no-watch" in args
+            assert args.count("--ignore") == 2
+            assert "draft" in args
+            assert "*.bak" in args
+            assert "--debounce" in args
+            assert "5.0" in args
+            assert "--log-level" in args
+            assert "DEBUG" in args
+
+    def test_config_default_options_not_serialized(self):
+        """기본값과 같은 옵션은 args에 포함되지 않음."""
+        from wiki_search_mcp.adapters.cli.main import main
+
+        runner = CliRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wiki_path = Path(tmpdir) / "wiki"
+            wiki_path.mkdir()
+            config_file = Path(tmpdir) / "claude_config.json"
+
+            # debounce 2.0(기본), log-level WARNING(기본) 명시 → 직렬화되지 않아야
+            result = runner.invoke(
+                main,
+                [
+                    "config",
+                    str(wiki_path),
+                    "--config-path",
+                    str(config_file),
+                    "--debounce",
+                    "2.0",
+                    "--log-level",
+                    "WARNING",
+                ],
+            )
+
+            assert result.exit_code == 0
+            args = json.loads(config_file.read_text())["mcpServers"]["wiki-search"][
+                "args"
+            ]
+            assert "--debounce" not in args
+            assert "--log-level" not in args
 
 
 class TestIndexCommand:
@@ -68,15 +153,12 @@ class TestIndexCommand:
         runner = CliRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # pages 없는 wiki 디렉토리
             wiki_path = Path(tmpdir) / "wiki"
             wiki_path.mkdir()
 
             result = runner.invoke(main, ["index", str(wiki_path)])
 
-            # pages 없어도 성공 (경고만 표시)
             assert result.exit_code == 0
-            # .md 파일 없으면 경고 메시지
             assert "경고" in result.output or ".md" in result.output
 
     def test_index_without_pages_with_md(self):
@@ -88,10 +170,38 @@ class TestIndexCommand:
         with tempfile.TemporaryDirectory() as tmpdir:
             wiki_path = Path(tmpdir) / "wiki"
             wiki_path.mkdir()
-            # 루트에 직접 .md 파일 생성
             (wiki_path / "test.md").write_text("# Test")
 
             result = runner.invoke(main, ["index", str(wiki_path)])
 
             assert result.exit_code == 0
             assert "pages/ 없음" in result.output or "루트로 사용" in result.output
+
+
+class TestServeCommandSignature:
+    """serve 명령의 인자/옵션 시그니처 검증.
+
+    실제 MCP 서버를 띄우지 않고, --help로 옵션 노출만 확인합니다.
+    """
+
+    def test_serve_requires_wiki_path(self):
+        from wiki_search_mcp.adapters.cli.main import main
+
+        runner = CliRunner()
+        # 인자 없이 호출 → 에러
+        result = runner.invoke(main, ["serve"])
+        assert result.exit_code != 0
+
+    def test_serve_help_shows_runtime_options(self):
+        from wiki_search_mcp.adapters.cli.main import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["serve", "--help"])
+        assert result.exit_code == 0
+        # 모든 런타임 옵션이 노출되어야 함
+        assert "--model" in result.output
+        assert "--ignore" in result.output
+        assert "--no-watch" in result.output
+        assert "--debounce" in result.output
+        assert "--log-level" in result.output
+        assert "--log-file" in result.output

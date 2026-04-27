@@ -7,7 +7,6 @@ LanceDB에 저장합니다. Wikilink 관계도 graph.json으로 저장합니다.
 """
 
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -36,22 +35,31 @@ class WikiIndexer:
         db: LanceDB 연결 객체
     """
 
-    def __init__(self, wiki_path: str, model_name: str | None = None):
+    def __init__(
+        self,
+        wiki_path: str,
+        model_name: str | None = None,
+        ignore_patterns: tuple[str, ...] = (),
+    ):
         """WikiIndexer 초기화.
 
         Args:
             wiki_path: wiki 루트 경로. pages/ 하위 디렉토리가 있으면 사용,
                        없으면 wiki_path 자체를 문서 루트로 사용.
-            model_name: 사용할 임베딩 모델명. None이면 환경변수 또는 기본값 사용.
+            model_name: 사용할 임베딩 모델명. None이면 기본값 사용.
                         "fast" 또는 "accurate"로 프리셋 선택 가능.
+            ignore_patterns: CLI ``--ignore``로 전달된 추가 무시 패턴
         """
         self.wiki_path = Path(wiki_path)
 
-        # 런타임 설정 로드
+        # 런타임 설정 로드 (현재는 기본값 dataclass 반환)
         self.wiki_config = WikiConfig.load(self.wiki_path)
 
-        # 무시 패턴 매처 (dot-prefix + .gitignore + WIKI_IGNORE)
-        self.ignore_matcher = IgnoreMatcher.from_wiki(self.wiki_path)
+        # 무시 패턴 매처 (dot-prefix + .gitignore + extra_patterns)
+        self.ignore_matcher = IgnoreMatcher.from_wiki(
+            self.wiki_path,
+            extra_patterns=tuple(ignore_patterns),
+        )
 
         # pages 디렉토리 탐지 (utils.resolve_pages_path 사용)
         self.pages_path = resolve_pages_path(self.wiki_path)
@@ -60,11 +68,11 @@ class WikiIndexer:
         self.db_path.mkdir(parents=True, exist_ok=True)
 
         # 모델 로드 (첫 실행 시 다운로드)
-        # 우선순위: 인자 > WikiConfig.embedding_model (env 반영됨) > 기본값
+        # 우선순위: 인자 > WikiConfig.embedding_model > 기본값
         model_key = (
             model_name
             or self.wiki_config.embedding_model
-            or os.environ.get("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+            or DEFAULT_EMBEDDING_MODEL
         )
         model_to_use = EMBEDDING_MODELS.get(model_key, model_key)
         self.model = SentenceTransformer(model_to_use)

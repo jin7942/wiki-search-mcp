@@ -7,10 +7,11 @@ from __future__ import annotations
 1. 하드코딩 dot-prefix: 이름이 점(.)으로 시작하는 모든 디렉토리/파일
    (.git, .obsidian, .vectordb, .DS_Store 등 자동 포괄)
 2. .gitignore 자동 파싱: wiki 루트에 .gitignore가 있으면 fnmatch 기반 적용
-3. WIKI_IGNORE 환경변수: 콤마(,) 구분 추가 패턴
+3. ``extra_patterns`` 인자: CLI ``--ignore`` 옵션이 누적된 추가 패턴
 
 사용 예:
     matcher = IgnoreMatcher.from_wiki(wiki_path)
+    matcher = IgnoreMatcher.from_wiki(wiki_path, extra_patterns=("draft", "*.bak"))
     if matcher.should_ignore(path):
         ...
 """
@@ -65,20 +66,6 @@ def _parse_gitignore(gitignore_path: Path) -> list[str]:
     return patterns
 
 
-def _parse_env_patterns() -> list[str]:
-    """WIKI_IGNORE 환경변수 파싱.
-
-    콤마(,) 구분 패턴 리스트로 반환합니다.
-
-    Returns:
-        패턴 리스트 (빈 리스트 가능)
-    """
-    raw = os.getenv("WIKI_IGNORE", "").strip()
-    if not raw:
-        return []
-    return [p.strip() for p in raw.split(",") if p.strip()]
-
-
 @dataclass(frozen=True)
 class IgnoreMatcher:
     """파일/디렉토리 무시 여부 판단기.
@@ -86,21 +73,26 @@ class IgnoreMatcher:
     Attributes:
         wiki_path: wiki 루트 경로 (상대 경로 계산 기준)
         gitignore_patterns: .gitignore에서 로드된 패턴
-        env_patterns: WIKI_IGNORE 환경변수 패턴
+        extra_patterns: CLI ``--ignore`` 등으로 추가된 패턴
         fallback_patterns: 추가 하드코딩 패턴 (node_modules 등)
     """
 
     wiki_path: Path
     gitignore_patterns: tuple[str, ...] = field(default_factory=tuple)
-    env_patterns: tuple[str, ...] = field(default_factory=tuple)
+    extra_patterns: tuple[str, ...] = field(default_factory=tuple)
     fallback_patterns: tuple[str, ...] = _FALLBACK_PATTERNS
 
     @classmethod
-    def from_wiki(cls, wiki_path: Path) -> "IgnoreMatcher":
+    def from_wiki(
+        cls,
+        wiki_path: Path,
+        extra_patterns: tuple[str, ...] = (),
+    ) -> "IgnoreMatcher":
         """wiki 경로 기준으로 IgnoreMatcher 생성.
 
         Args:
             wiki_path: wiki 루트 경로
+            extra_patterns: CLI 등에서 받은 추가 무시 패턴 (튜플/리스트)
 
         Returns:
             IgnoreMatcher 인스턴스
@@ -110,12 +102,15 @@ class IgnoreMatcher:
         if gitignore.exists():
             gitignore_patterns = tuple(_parse_gitignore(gitignore))
 
-        env_patterns = tuple(_parse_env_patterns())
+        # extra_patterns의 양 끝 공백 정리 + 빈 항목 제거
+        cleaned_extra = tuple(
+            p.strip() for p in extra_patterns if p and p.strip()
+        )
 
         return cls(
             wiki_path=wiki_path,
             gitignore_patterns=gitignore_patterns,
-            env_patterns=env_patterns,
+            extra_patterns=cleaned_extra,
         )
 
     @property
@@ -130,7 +125,7 @@ class IgnoreMatcher:
         1. 경로의 어떤 컴포넌트라도 점(.)으로 시작하면 무시
         2. fallback 패턴(node_modules 등)에 컴포넌트가 일치하면 무시
         3. .gitignore 패턴 매칭
-        4. WIKI_IGNORE 환경변수 패턴 매칭
+        4. extra_patterns(CLI ``--ignore``) 매칭
 
         Args:
             path: 검사할 경로 (절대/상대 모두 허용)
@@ -148,9 +143,9 @@ class IgnoreMatcher:
             if part in self.fallback_patterns:
                 return True
 
-        # 3, 4. gitignore + env 패턴 매칭
+        # 3, 4. gitignore + extra 패턴 매칭
         rel_path = self._to_relative(path)
-        all_patterns = (*self.gitignore_patterns, *self.env_patterns)
+        all_patterns = (*self.gitignore_patterns, *self.extra_patterns)
         for pattern in all_patterns:
             if self._matches_pattern(rel_path, pattern):
                 return True

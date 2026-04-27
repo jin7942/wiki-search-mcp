@@ -1,39 +1,36 @@
 """로깅 인프라.
 
-환경변수:
-- WIKI_LOG_LEVEL: DEBUG/INFO/WARNING/ERROR (기본: WARNING)
-- WIKI_LOG_FILE: 로그 파일 경로 (선택)
+CLI 옵션 (--log-level, --log-file) 또는 함수 인자로 명시적으로 설정합니다.
+환경변수는 사용하지 않습니다.
 """
 
 from __future__ import annotations
 
 import logging
-import os
+from pathlib import Path
 
 
-def setup_logging() -> None:
+def setup_logging(
+    level: str = "WARNING",
+    log_file: str | Path | None = None,
+) -> None:
     """로깅 설정 초기화.
 
-    환경변수에서 로그 레벨과 파일 경로를 읽어 설정합니다.
-
-    환경변수:
-        WIKI_LOG_LEVEL: DEBUG, INFO, WARNING, ERROR 중 하나 (기본: WARNING)
-        WIKI_LOG_FILE: 로그 파일 경로 (선택, 없으면 stderr만 출력)
+    Args:
+        level: DEBUG, INFO, WARNING, ERROR 중 하나 (기본: WARNING)
+        log_file: 로그 파일 경로 (None이면 stderr만 출력)
     """
-    level_str = os.environ.get("WIKI_LOG_LEVEL", "WARNING").upper()
-    log_file = os.environ.get("WIKI_LOG_FILE")
-
     # 로그 레벨 파싱
-    level = getattr(logging, level_str, logging.WARNING)
+    level_value = getattr(logging, level.upper(), logging.WARNING)
 
     # 핸들러 설정
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if log_file:
-        handlers.append(logging.FileHandler(log_file))
+        handlers.append(logging.FileHandler(str(log_file)))
 
     # 로거 설정
     logging.basicConfig(
-        level=level,
+        level=level_value,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=handlers,
         force=True,  # 기존 설정 덮어쓰기
@@ -41,7 +38,7 @@ def setup_logging() -> None:
 
     # wiki_search_mcp 네임스페이스 로거 레벨 설정
     pkg_logger = logging.getLogger("wiki_search_mcp")
-    pkg_logger.setLevel(level)
+    pkg_logger.setLevel(level_value)
 
 
 def get_logger(name: str) -> logging.Logger:

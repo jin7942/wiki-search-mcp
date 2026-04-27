@@ -129,25 +129,30 @@ wiki-search-mcp index ~/my-notes          # 증분 업데이트
 wiki-search-mcp index ~/my-notes --full   # 전체 재구축
 ```
 
-### `serve`
+### `serve <path>`
 
 MCP 서버 직접 실행 (디버깅용).
 
 ```bash
-WIKI_PATH=~/my-notes wiki-search-mcp serve
+wiki-search-mcp serve ~/my-notes
+wiki-search-mcp serve ~/my-notes --log-level DEBUG --no-watch
 ```
 
 ## Configuration
 
-### Environment Variables
+**환경변수 없음.** 모든 설정은 CLI 위치 인자/플래그로 전달합니다. `config` 명령은 옵션을 `claude_desktop_config.json`의 `args` 배열에 직접 직렬화합니다.
 
-| 변수 | 설명 | 기본값 |
+### CLI Options (`serve` / `config` 공통)
+
+| 옵션 | 설명 | 기본값 |
 |------|------|--------|
-| `WIKI_PATH` | 노트 루트 경로 | 필수 |
-| `WIKI_EMBEDDING_MODEL` | 임베딩 모델 (`fast`, `accurate`, 또는 모델명) | `accurate` |
-| `WIKI_IGNORE` | 추가 무시 패턴 (콤마 구분) | (비어있음) |
-| `WIKI_WATCH` | 파일 감시 활성화 | `true` |
-| `WIKI_DEBOUNCE` | 감시 디바운스 시간(초) | `2.0` |
+| `<path>` | 노트 루트 경로 (위치 인자, 필수) | — |
+| `--model NAME` | 임베딩 모델 프리셋 (`fast`/`accurate`) 또는 모델명 | `accurate` |
+| `--ignore PATTERN` | 추가 무시 패턴 (반복 가능) | (없음) |
+| `--no-watch` | 파일 감시 비활성화 | (감시 활성) |
+| `--debounce SECONDS` | 감시 디바운스(초) | `2.0` |
+| `--log-level LEVEL` | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `WARNING` |
+| `--log-file PATH` | 로그 파일 경로 | (stderr만) |
 
 ### Embedding Models
 
@@ -165,14 +170,19 @@ CLI 대신 직접 설정하려면 `~/.claude/claude_desktop_config.json`:
   "mcpServers": {
     "wiki-search": {
       "command": "wiki-search-mcp",
-      "args": ["serve"],
-      "env": {
-        "WIKI_PATH": "/absolute/path/to/your/notes"
-      }
+      "args": ["serve", "/absolute/path/to/your/notes"]
     }
   }
 }
 ```
+
+옵션을 추가하려면 `args` 배열에 그대로 이어붙이세요:
+
+```json
+"args": ["serve", "/abs/path", "--model", "fast", "--no-watch"]
+```
+
+또는 `wiki-search-mcp config <path> --model fast --no-watch` 한 줄로 자동 생성하면 됩니다.
 
 ## Ignore Patterns
 
@@ -180,11 +190,10 @@ CLI 대신 직접 설정하려면 `~/.claude/claude_desktop_config.json`:
 
 1. **자동**: 점(`.`)으로 시작하는 디렉토리/파일 (`.git`, `.obsidian`, `.vectordb`, `.DS_Store` 등)
 2. **`.gitignore` 자동 활용**: 노트 루트의 `.gitignore`가 있으면 패턴 적용
-3. **`WIKI_IGNORE` 환경변수**: 콤마 구분 추가 패턴
+3. **`--ignore` 옵션**: CLI에서 반복 지정 가능
 
 ```bash
-# 환경변수 예시
-WIKI_IGNORE="draft,*.bak,private" wiki-search-mcp serve
+wiki-search-mcp serve ~/notes --ignore "draft" --ignore "*.bak" --ignore "private"
 ```
 
 ## File Watching
@@ -193,11 +202,11 @@ MCP 서버가 실행되면 자동으로 노트 디렉토리를 감시합니다.
 
 - `.md` 파일이 추가/수정/삭제되면 자동 인덱스 갱신
 - 디바운스: 연속된 변경은 마지막 변경 후 2초 대기 후 처리
-- 비활성화: `WIKI_WATCH=false`
+- 비활성화: `--no-watch`
 
 ```bash
-WIKI_WATCH=false WIKI_PATH=~/notes wiki-search-mcp serve   # 감시 비활성화
-WIKI_DEBOUNCE=5.0 WIKI_PATH=~/notes wiki-search-mcp serve  # 디바운스 5초
+wiki-search-mcp serve ~/notes --no-watch          # 감시 비활성화
+wiki-search-mcp serve ~/notes --debounce 5.0      # 디바운스 5초
 ```
 
 ## Troubleshooting
@@ -220,7 +229,7 @@ wiki-search-mcp index ~/my-notes --full
 
 ```bash
 # 직접 실행하여 에러 확인
-WIKI_PATH=~/my-notes wiki-search-mcp serve
+wiki-search-mcp serve ~/my-notes --log-level DEBUG
 ```
 
 ## Documentation

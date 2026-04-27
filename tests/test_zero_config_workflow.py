@@ -103,18 +103,14 @@ def test_gitignore_excludes_files(tmp_path: Path):
     assert not matcher.should_ignore(tmp_path / "Notes" / "ok.md")
 
 
-def test_wiki_ignore_env_excludes_pattern(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """WIKI_IGNORE 환경변수 패턴 적용."""
-    monkeypatch.setenv("WIKI_IGNORE", "scratch")
-
+def test_extra_patterns_excludes_pattern(tmp_path: Path):
+    """extra_patterns 인자로 무시 패턴 적용 (CLI --ignore에 해당)."""
     (tmp_path / "Notes").mkdir()
     (tmp_path / "Notes" / "ok.md").write_text("# OK", encoding="utf-8")
     (tmp_path / "scratch").mkdir()
     (tmp_path / "scratch" / "tmp.md").write_text("# Tmp", encoding="utf-8")
 
-    matcher = IgnoreMatcher.from_wiki(tmp_path)
+    matcher = IgnoreMatcher.from_wiki(tmp_path, extra_patterns=("scratch",))
     assert matcher.should_ignore(tmp_path / "scratch" / "tmp.md")
     assert not matcher.should_ignore(tmp_path / "Notes" / "ok.md")
 

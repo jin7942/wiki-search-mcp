@@ -7,9 +7,28 @@ v0.7.0: ServiceContainer 기반 구조로 마이그레이션됨.
 """
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import wiki_search_mcp.adapters.mcp.server as server_module
+from wiki_search_mcp.adapters.mcp.server import ServerOptions
+
+
+@pytest.fixture(autouse=True)
+def _ensure_options(tmp_path: Path):
+    """모든 server 테스트에 ServerOptions 기본값 주입.
+
+    실제 main()이 호출되지 않으므로 _options이 None인 상태로 인해
+    핸들러 진입 시 RuntimeError가 나는 것을 방지합니다.
+    """
+    original = server_module._options
+    server_module._options = ServerOptions(wiki_path=tmp_path)
+    try:
+        yield
+    finally:
+        server_module._options = original
 
 
 def _create_mock_container():
@@ -162,15 +181,19 @@ class TestWikiStatsTool:
 class TestWikiWatchStatusTool:
     """wiki_watch_status 도구 테스트."""
 
-    def test_watch_status_when_disabled(self):
-        """watcher 비활성화 상태."""
-        # _watcher = None 상태에서 테스트
+    def test_watch_status_when_disabled(self, tmp_path):
+        """watcher 비활성화 상태 (_options.watch=False)."""
+        from wiki_search_mcp.adapters.mcp.server import ServerOptions
+
         original_watcher = server_module._watcher
-        original_watch = server_module.WIKI_WATCH
+        original_options = server_module._options
 
         try:
             server_module._watcher = None
-            server_module.WIKI_WATCH = False
+            server_module._options = ServerOptions(
+                wiki_path=tmp_path,
+                watch=False,
+            )
 
             from wiki_search_mcp.adapters.mcp.server import wiki_watch_status
 
@@ -181,10 +204,12 @@ class TestWikiWatchStatusTool:
             assert data["running"] is False
         finally:
             server_module._watcher = original_watcher
-            server_module.WIKI_WATCH = original_watch
+            server_module._options = original_options
 
-    def test_watch_status_when_running(self):
+    def test_watch_status_when_running(self, tmp_path):
         """watcher 실행 중 상태."""
+        from wiki_search_mcp.adapters.mcp.server import ServerOptions
+
         mock_watcher = MagicMock()
         mock_watcher.get_status.return_value = {
             "enabled": True,
@@ -194,9 +219,14 @@ class TestWikiWatchStatusTool:
         }
 
         original_watcher = server_module._watcher
+        original_options = server_module._options
 
         try:
             server_module._watcher = mock_watcher
+            server_module._options = ServerOptions(
+                wiki_path=tmp_path,
+                watch=True,
+            )
 
             from wiki_search_mcp.adapters.mcp.server import wiki_watch_status
 
@@ -207,6 +237,7 @@ class TestWikiWatchStatusTool:
             assert data["running"] is True
         finally:
             server_module._watcher = original_watcher
+            server_module._options = original_options
 
 
 class TestWikiGetDocumentTool:

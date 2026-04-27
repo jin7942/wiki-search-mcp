@@ -79,7 +79,7 @@ pip install -e ".[dev]"
 pytest tests/ -v
 
 # 4. MCP 서버 직접 실행 (디버깅용)
-WIKI_PATH=~/my-notes wiki-search-mcp serve
+wiki-search-mcp serve ~/my-notes --log-level DEBUG
 ```
 
 ---
@@ -96,9 +96,9 @@ WIKI_PATH=~/my-notes wiki-search-mcp serve
    *.bak
    private/
    ```
-3. **`WIKI_IGNORE` 환경변수**:
+3. **`--ignore` CLI 옵션** (반복 가능):
    ```bash
-   WIKI_IGNORE="scratch,*.tmp" wiki-search-mcp serve
+   wiki-search-mcp serve ~/my-notes --ignore "scratch" --ignore "*.tmp"
    ```
 
 ---

@@ -13,10 +13,10 @@
 
 ```bash
 # 빠른 모델 사용 (영어 Wiki)
-EMBEDDING_MODEL=fast wiki-search-mcp index ./wiki --full
+wiki-search-mcp index ./wiki --full --model fast
 
 # 정확한 모델 사용 (한국어 Wiki, 기본값)
-EMBEDDING_MODEL=accurate wiki-search-mcp index ./wiki --full
+wiki-search-mcp index ./wiki --full --model accurate
 ```
 
 ---
@@ -44,9 +44,9 @@ wiki_reindex(full=True)   # 전체 재구축 (메모리 많이 사용)
    drafts/
    templates/
    ```
-3. **`WIKI_IGNORE` 환경변수**: 콤마 구분 추가 패턴
+3. **`--ignore` CLI 옵션** (반복 가능):
    ```bash
-   WIKI_IGNORE="*.tmp,drafts,templates" wiki-search-mcp serve
+   wiki-search-mcp serve ~/notes --ignore "*.tmp" --ignore "drafts" --ignore "templates"
    ```
 
 ---

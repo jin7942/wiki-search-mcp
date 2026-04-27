@@ -14,7 +14,6 @@ Indexer와 Searcher가 동일한 모델 인스턴스를 공유합니다.
 
 from __future__ import annotations
 
-import os
 import threading
 from typing import TYPE_CHECKING
 
@@ -36,7 +35,7 @@ def get_model(model_name: str | None = None) -> "SentenceTransformer":
 
     Args:
         model_name: 모델 이름 또는 프리셋 ("fast", "accurate").
-                    None이면 환경변수 또는 기본값 사용.
+                    None이면 기본값(``DEFAULT_EMBEDDING_MODEL``) 사용.
 
     Returns:
         SentenceTransformer 모델 인스턴스
@@ -49,8 +48,8 @@ def get_model(model_name: str | None = None) -> "SentenceTransformer":
     """
     from sentence_transformers import SentenceTransformer
 
-    # 모델 키 결정
-    model_key = model_name or os.environ.get("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+    # 모델 키 결정 (인자 > 기본값)
+    model_key = model_name or DEFAULT_EMBEDDING_MODEL
 
     # 프리셋 → 실제 모델 경로 변환
     model_path = EMBEDDING_MODELS.get(model_key, model_key)

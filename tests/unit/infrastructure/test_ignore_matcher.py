@@ -91,11 +91,11 @@ def test_no_gitignore(wiki_root: Path):
     assert not matcher.gitignore_loaded
 
 
-def test_env_wiki_ignore(wiki_root: Path, monkeypatch: pytest.MonkeyPatch):
-    """WIKI_IGNORE 환경변수 패턴 적용."""
-    monkeypatch.setenv("WIKI_IGNORE", "draft,*.tmp,private")
-
-    matcher = IgnoreMatcher.from_wiki(wiki_root)
+def test_extra_patterns_param(wiki_root: Path):
+    """extra_patterns 인자로 추가 패턴 적용."""
+    matcher = IgnoreMatcher.from_wiki(
+        wiki_root, extra_patterns=("draft", "*.tmp", "private")
+    )
 
     assert matcher.should_ignore(wiki_root / "draft" / "wip.md")
     assert matcher.should_ignore(wiki_root / "scratch.tmp")
@@ -103,37 +103,34 @@ def test_env_wiki_ignore(wiki_root: Path, monkeypatch: pytest.MonkeyPatch):
     assert not matcher.should_ignore(wiki_root / "Notes" / "memo.md")
 
 
-def test_env_wiki_ignore_empty(wiki_root: Path, monkeypatch: pytest.MonkeyPatch):
-    """WIKI_IGNORE 빈 값은 영향 없음."""
-    monkeypatch.setenv("WIKI_IGNORE", "")
-
-    matcher = IgnoreMatcher.from_wiki(wiki_root)
+def test_extra_patterns_empty(wiki_root: Path):
+    """extra_patterns 빈 튜플은 영향 없음."""
+    matcher = IgnoreMatcher.from_wiki(wiki_root, extra_patterns=())
 
     assert not matcher.should_ignore(wiki_root / "Notes" / "memo.md")
 
 
-def test_env_wiki_ignore_whitespace_handling(
-    wiki_root: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """WIKI_IGNORE 패턴 주변 공백 처리."""
-    monkeypatch.setenv("WIKI_IGNORE", " draft , *.bak , ")
-
-    matcher = IgnoreMatcher.from_wiki(wiki_root)
+def test_extra_patterns_whitespace_stripped(wiki_root: Path):
+    """extra_patterns 항목의 양 끝 공백은 자동 제거."""
+    matcher = IgnoreMatcher.from_wiki(
+        wiki_root, extra_patterns=(" draft ", "  *.bak  ", "")
+    )
 
     assert matcher.should_ignore(wiki_root / "draft" / "wip.md")
     assert matcher.should_ignore(wiki_root / "old.bak")
 
 
-def test_combined_priorities(wiki_root: Path, monkeypatch: pytest.MonkeyPatch):
-    """dot-prefix + .gitignore + WIKI_IGNORE 모두 결합 동작."""
+def test_combined_priorities(wiki_root: Path):
+    """dot-prefix + .gitignore + extra_patterns 모두 결합 동작."""
     (wiki_root / ".gitignore").write_text("build/\n", encoding="utf-8")
-    monkeypatch.setenv("WIKI_IGNORE", "scratch")
 
-    matcher = IgnoreMatcher.from_wiki(wiki_root)
+    matcher = IgnoreMatcher.from_wiki(
+        wiki_root, extra_patterns=("scratch",)
+    )
 
     assert matcher.should_ignore(wiki_root / ".git" / "x")  # dot-prefix
     assert matcher.should_ignore(wiki_root / "build" / "out.md")  # gitignore
-    assert matcher.should_ignore(wiki_root / "scratch" / "test.md")  # env
+    assert matcher.should_ignore(wiki_root / "scratch" / "test.md")  # extra
     assert not matcher.should_ignore(wiki_root / "Notes" / "memo.md")
 
 

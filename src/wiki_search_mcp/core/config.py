@@ -7,7 +7,6 @@ from __future__ import annotations
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,10 +104,7 @@ LISTING_TTL_SECONDS: float = 60.0
 class WikiConfig:
     """Wiki 런타임 설정.
 
-    설정 파일을 사용하지 않습니다. 환경 변수와 인자로만 결정됩니다.
-
-    - WIKI_EMBEDDING_MODEL 환경 변수 또는 ``embedding_model`` 인자로 모델 선택
-    - 무시 패턴은 ``IgnoreMatcher``가 dot-prefix + .gitignore + WIKI_IGNORE로 처리
+    설정 파일과 환경변수를 사용하지 않습니다. CLI 인자/플래그로만 결정됩니다.
 
     Attributes:
         embedding_model: 사용할 임베딩 모델 프리셋 ("fast" / "accurate") 또는 모델명
@@ -118,19 +114,16 @@ class WikiConfig:
 
     @classmethod
     def load(cls, wiki_path: Path | None = None) -> "WikiConfig":
-        """런타임 설정 로드.
+        """런타임 설정 로드 (호환성용).
 
-        ``wiki_path``는 향후 확장 호환성을 위해 받지만 현재는 사용하지 않습니다.
-        환경 변수 ``WIKI_EMBEDDING_MODEL``이 있으면 그 값을, 없으면 기본값을 사용합니다.
+        ``wiki_path``는 향후 확장을 위해 받지만 현재는 사용하지 않습니다.
+        모델 선택은 CLI 옵션(``--model``)이나 인자로 직접 전달하세요.
 
         Args:
-            wiki_path: wiki 루트 경로 (호환성용, 사용되지 않음)
+            wiki_path: wiki 루트 경로 (호환성용)
 
         Returns:
-            WikiConfig 인스턴스
+            기본 WikiConfig 인스턴스
         """
         del wiki_path  # 호환성을 위해 받지만 사용하지 않음
-        model = os.getenv("WIKI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip()
-        if not model:
-            model = DEFAULT_EMBEDDING_MODEL
-        return cls(embedding_model=model)
+        return cls()

@@ -1,6 +1,60 @@
 # 변경 이력
 
-## [Unreleased] - Zero-Config 자동 분류 PKM 전환
+## [Unreleased]
+
+### Breaking Changes (환경변수 제거)
+
+- **모든 환경변수 제거 (7 → 0)**. zero-config 정체성과 일관되게 모든 설정을 CLI 위치 인자/플래그로 전환.
+  - `WIKI_PATH` → 위치 인자: `wiki-search-mcp serve <path>`
+  - `WIKI_EMBEDDING_MODEL` → `--model {fast|accurate|<id>}`
+  - `WIKI_IGNORE` → `--ignore PATTERN` (반복 가능)
+  - `WIKI_WATCH=false` → `--no-watch` 플래그
+  - `WIKI_DEBOUNCE` → `--debounce SECONDS`
+  - `WIKI_LOG_LEVEL` → `--log-level {DEBUG|INFO|WARNING|ERROR}`
+  - `WIKI_LOG_FILE` → `--log-file PATH`
+- **`config` 명령 출력 변경**: `claude_desktop_config.json`의 `env` 섹션을 더 이상 작성하지 않습니다. wiki path와 옵션이 `args` 배열에 직접 직렬화됩니다.
+- **`serve` 명령 시그니처 변경**: 기존 `wiki-search-mcp serve` (인자 없음) → `wiki-search-mcp serve <path>` (위치 인자 필수).
+- **`setup_logging()` 시그니처 변경**: 환경변수 대신 `level`, `log_file` 인자로 호출.
+- **모듈 import 부작용 제거**: `import wiki_search_mcp.adapters.mcp.server` 시 더 이상 환경변수 또는 로깅 초기화가 자동 실행되지 않습니다.
+
+### Migration
+
+기존 사용자는 다음 한 줄로 재등록하면 됩니다:
+
+```bash
+wiki-search-mcp config /Users/me/notes
+```
+
+옵션 사용 시:
+
+```bash
+wiki-search-mcp config /Users/me/notes --model fast --no-watch
+```
+
+생성되는 JSON:
+
+```json
+{
+  "mcpServers": {
+    "wiki-search": {
+      "command": "wiki-search-mcp",
+      "args": ["serve", "/Users/me/notes", "--model", "fast", "--no-watch"]
+    }
+  }
+}
+```
+
+### Internal
+
+- `IgnoreMatcher.env_patterns` → `extra_patterns`로 이름 변경, `from_wiki(wiki_path, extra_patterns=())` 시그니처
+- `ServiceContainer(wiki_path, model_name, ignore_patterns=())` 시그니처 확장
+- `WikiIndexer(wiki_path, model_name, ignore_patterns=())` 시그니처 확장
+- `ServerOptions` dataclass 신설 (`adapters/mcp/server.py`)
+- 신규 테스트: `tests/unit/core/test_logging.py`, `tests/unit/adapters/test_cli_serialization.py`
+
+---
+
+## Zero-Config 자동 분류 PKM 전환 (이전 작업)
 
 ### Breaking Changes
 

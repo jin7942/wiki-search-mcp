@@ -12,7 +12,7 @@
 #  4. wiki_pending
 #  5. wiki_suggest_classification
 #  6. .gitignore 자동 무시
-#  7. WIKI_IGNORE 환경변수
+#  7. --ignore CLI 옵션
 #  8. init 명령 부재 / 패키지 wiki-template 부재
 #  9. wheel 빌드물에 wiki-template 부재 (A안 추가)
 #
@@ -116,8 +116,10 @@ run_step "config 명령 실행" \
 assert "config 파일 생성됨" "[[ -f '$CONFIG_FILE' ]]"
 assert "wiki-search 서버 등록됨" \
     "grep -q 'wiki-search' '$CONFIG_FILE'"
-assert "WIKI_PATH 정확함" \
-    "grep -q '\"WIKI_PATH\"' '$CONFIG_FILE' && grep -q '$EMPTY_DIR' '$CONFIG_FILE'"
+assert "args에 path 등록됨" \
+    "grep -q '\"args\"' '$CONFIG_FILE' && grep -q '$EMPTY_DIR' '$CONFIG_FILE'"
+assert "env 섹션 없음 (환경변수 미사용)" \
+    "! grep -q '\"env\"' '$CONFIG_FILE'"
 
 # ──────────────────────────────────────────────────────────────
 # 시나리오 2: 폴더 구조 + index
@@ -158,7 +160,7 @@ assert ".vectordb 디렉토리 생성됨" \
 log ""
 log "── 시나리오 3: wiki_get_categories ──"
 CAT_OUT="$WORK_DIR/categories.json"
-WIKI_PATH="$FOLDER_DIR" python -c "
+python -c "
 from wiki_search_mcp.adapters.mcp.container import ServiceContainer
 from wiki_search_mcp.adapters.mcp.handlers import handle_wiki_get_categories
 c = ServiceContainer('$FOLDER_DIR')
@@ -179,7 +181,7 @@ assert "Projects 카테고리 포함" \
 log ""
 log "── 시나리오 4: wiki_pending ──"
 PENDING_OUT="$WORK_DIR/pending.json"
-WIKI_PATH="$FOLDER_DIR" python -c "
+python -c "
 from wiki_search_mcp.adapters.mcp.container import ServiceContainer
 from wiki_search_mcp.adapters.mcp.handlers import handle_wiki_pending
 c = ServiceContainer('$FOLDER_DIR')
@@ -197,7 +199,7 @@ assert "draft.md 감지됨 (frontmatter 없음)" \
 log ""
 log "── 시나리오 5: wiki_suggest_classification ──"
 SUGGEST_OUT="$WORK_DIR/suggest.json"
-WIKI_PATH="$FOLDER_DIR" python -c "
+python -c "
 from wiki_search_mcp.adapters.mcp.container import ServiceContainer
 from wiki_search_mcp.adapters.mcp.handlers import handle_wiki_suggest_classification
 c = ServiceContainer('$FOLDER_DIR')
@@ -253,17 +255,17 @@ assert "draft/wip.md는 무시됨" \
     "! grep -q 'wip.md' '$WORK_DIR/indexed.json'"
 
 # ──────────────────────────────────────────────────────────────
-# 시나리오 7: WIKI_IGNORE 환경변수
+# 시나리오 7: --ignore CLI 옵션
 # ──────────────────────────────────────────────────────────────
 log ""
-log "── 시나리오 7: WIKI_IGNORE 환경변수 ──"
+log "── 시나리오 7: --ignore CLI 옵션 ──"
 ENV_DIR="$WORK_DIR/env-notes"
 mkdir -p "$ENV_DIR/Notes" "$ENV_DIR/scratch" "$ENV_DIR/Projects"
 echo "# Keep" > "$ENV_DIR/Notes/keep.md"
 echo "# Tmp" > "$ENV_DIR/scratch/tmp.md"
 echo "# P" > "$ENV_DIR/Projects/p.md"
 
-WIKI_IGNORE="scratch" wiki-search-mcp index "$ENV_DIR" --full >>"$LOG_FILE" 2>&1
+wiki-search-mcp index "$ENV_DIR" --full --ignore "scratch" >>"$LOG_FILE" 2>&1
 
 python << PY > "$WORK_DIR/env-indexed.json" 2>>"$LOG_FILE"
 import lancedb, json
@@ -284,7 +286,7 @@ PY
 
 assert "keep.md 인덱싱됨" \
     "grep -q 'keep.md' '$WORK_DIR/env-indexed.json'"
-assert "scratch/tmp.md는 WIKI_IGNORE로 무시됨" \
+assert "scratch/tmp.md는 --ignore로 무시됨" \
     "! grep -q 'tmp.md' '$WORK_DIR/env-indexed.json'"
 
 # ──────────────────────────────────────────────────────────────

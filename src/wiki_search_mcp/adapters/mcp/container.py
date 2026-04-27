@@ -42,17 +42,24 @@ class ServiceContainer:
         _cache: 인스턴스 캐시
     """
 
-    def __init__(self, wiki_path: str, model_name: str | None = None):
+    def __init__(
+        self,
+        wiki_path: str,
+        model_name: str | None = None,
+        ignore_patterns: tuple[str, ...] = (),
+    ):
         """ServiceContainer 초기화.
 
         Args:
             wiki_path: wiki 루트 경로
             model_name: 임베딩 모델 이름 (선택적)
+            ignore_patterns: CLI ``--ignore``로 전달된 추가 무시 패턴
         """
         self._wiki_path = Path(wiki_path)
         self._wiki_config = WikiConfig.load(self._wiki_path)
-        # 모델 이름: 인자 > 설정 파일 > 기본값
+        # 모델 이름: 인자 > 기본값
         self._model_name = model_name or self._wiki_config.embedding_model
+        self._ignore_patterns = tuple(ignore_patterns)
         self._cache: dict[str, Any] = {}
 
     # ==========================================================================
@@ -127,11 +134,14 @@ class ServiceContainer:
 
     @property
     def ignore_matcher(self):
-        """무시 패턴 매처 (dot-prefix + .gitignore + WIKI_IGNORE)."""
+        """무시 패턴 매처 (dot-prefix + .gitignore + CLI ``--ignore``)."""
         if "ignore_matcher" not in self._cache:
             from wiki_search_mcp.infrastructure.ignore import IgnoreMatcher
 
-            self._cache["ignore_matcher"] = IgnoreMatcher.from_wiki(self._wiki_path)
+            self._cache["ignore_matcher"] = IgnoreMatcher.from_wiki(
+                self._wiki_path,
+                extra_patterns=self._ignore_patterns,
+            )
         return self._cache["ignore_matcher"]
 
     def _verify_protocol(self, instance: Any, protocol: type, name: str) -> None:

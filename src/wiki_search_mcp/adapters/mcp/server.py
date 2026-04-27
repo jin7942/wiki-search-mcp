@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import atexit
 import logging
-import os
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -56,21 +56,36 @@ from .handlers import (
 )
 from .instructions import WIKI_INSTRUCTIONS
 
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-
-# 환경변수 기반 로깅 설정 초기화
-setup_logging()
 logger = logging.getLogger(__name__)
 
+
 # =============================================================================
-# Environment Configuration
+# Server Options (CLI에서 주입)
 # =============================================================================
 
-WIKI_PATH = os.environ.get("WIKI_PATH", "./wiki")
-WIKI_WATCH = os.environ.get("WIKI_WATCH", "true").lower() in ("true", "1", "yes")
-WIKI_DEBOUNCE = float(os.environ.get("WIKI_DEBOUNCE", "2.0"))
+
+@dataclass(frozen=True)
+class ServerOptions:
+    """MCP 서버 런타임 옵션. CLI에서 빌드되어 main()에 주입됩니다.
+
+    Attributes:
+        wiki_path: wiki 루트 (필수)
+        model: 임베딩 모델 프리셋 또는 모델명 (None이면 기본값 'accurate')
+        ignore_patterns: 추가 무시 패턴 (CLI --ignore 누적)
+        watch: 파일 감시 활성 여부 (기본 True)
+        debounce: 감시 디바운스 (초)
+        log_level: 로그 레벨
+        log_file: 로그 파일 경로 (None이면 stderr만)
+    """
+
+    wiki_path: Path
+    model: str | None = None
+    ignore_patterns: tuple[str, ...] = field(default_factory=tuple)
+    watch: bool = True
+    debounce: float = 2.0
+    log_level: str = "WARNING"
+    log_file: Path | None = None
+
 
 # =============================================================================
 # MCP Server Initialization
@@ -82,16 +97,31 @@ mcp = FastMCP("wiki-search", instructions=WIKI_INSTRUCTIONS)
 # Global State (Lazy Initialization)
 # =============================================================================
 
+_options: ServerOptions | None = None
 _container: ServiceContainer | None = None
 _indexer: WikiIndexer | None = None
 _watcher: WikiWatcher | None = None
+
+
+def _require_options() -> ServerOptions:
+    """_options이 설정되지 않았으면 RuntimeError. main()이 먼저 호출되어야 함."""
+    if _options is None:
+        raise RuntimeError(
+            "ServerOptions not initialized. Call main(options) first."
+        )
+    return _options
 
 
 def get_container() -> ServiceContainer:
     """ServiceContainer 싱글톤 반환."""
     global _container
     if _container is None:
-        _container = ServiceContainer(WIKI_PATH)
+        opts = _require_options()
+        _container = ServiceContainer(
+            str(opts.wiki_path),
+            model_name=opts.model,
+            ignore_patterns=opts.ignore_patterns,
+        )
     return _container
 
 
@@ -99,7 +129,12 @@ def get_indexer() -> WikiIndexer:
     """WikiIndexer 싱글톤 반환."""
     global _indexer
     if _indexer is None:
-        _indexer = WikiIndexer(WIKI_PATH)
+        opts = _require_options()
+        _indexer = WikiIndexer(
+            str(opts.wiki_path),
+            model_name=opts.model,
+            ignore_patterns=opts.ignore_patterns,
+        )
     return _indexer
 
 
@@ -147,22 +182,22 @@ def start_watcher() -> bool:
     """
     global _watcher
 
-    if not WIKI_WATCH:
-        logger.info("File watching disabled (WIKI_WATCH=false)")
+    opts = _require_options()
+    if not opts.watch:
+        logger.info("File watching disabled (--no-watch)")
         return False
 
     # pages 디렉토리 탐지
-    wiki_path = Path(WIKI_PATH)
-    pages_path = resolve_pages_path(wiki_path)
+    pages_path = resolve_pages_path(opts.wiki_path)
 
     _watcher = WikiWatcher(
         pages_path=pages_path,
         reindex_callback=_auto_reindex,
-        debounce_seconds=WIKI_DEBOUNCE,
+        debounce_seconds=opts.debounce,
     )
 
     if _watcher.start():
-        logger.info(f"File watching enabled (debounce: {WIKI_DEBOUNCE}s)")
+        logger.info(f"File watching enabled (debounce: {opts.debounce}s)")
         return True
     else:
         logger.warning("Failed to start file watcher")
@@ -349,13 +384,13 @@ def wiki_watch_status() -> str:
     Returns:
         상태 JSON 문자열
     """
-    wiki_path = Path(WIKI_PATH)
-    pages_path = resolve_pages_path(wiki_path)
+    opts = _require_options()
+    pages_path = resolve_pages_path(opts.wiki_path)
 
     return handle_wiki_watch_status(
         watcher=_watcher,
-        enabled=WIKI_WATCH,
-        debounce_seconds=WIKI_DEBOUNCE,
+        enabled=opts.watch,
+        debounce_seconds=opts.debounce,
         watching_path=str(pages_path),
     )
 
@@ -504,8 +539,20 @@ def wiki_suggest_classification(path: str) -> str:
 # =============================================================================
 
 
-def main():
-    """MCP 서버 실행."""
+def main(options: ServerOptions) -> None:
+    """MCP 서버 실행.
+
+    Args:
+        options: CLI에서 빌드한 런타임 옵션 (wiki_path 필수)
+    """
+    global _options
+
+    # 옵션 보관 (다른 함수들이 _require_options()로 참조)
+    _options = options
+
+    # 로깅 초기화 (CLI 옵션 기반)
+    setup_logging(level=options.log_level, log_file=options.log_file)
+
     # 파일 감시 시작
     start_watcher()
 
@@ -517,4 +564,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # 직접 실행은 CLI 위임 (인자 파싱을 위해)
+    from wiki_search_mcp.adapters.cli.main import main as cli_main
+
+    cli_main()
