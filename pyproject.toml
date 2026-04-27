@@ -51,9 +51,14 @@ Changelog = "https://github.com/jin7942/wiki-search-mcp/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 source = "vcs"
+fallback-version = "0.0.0"
 
 [tool.hatch.version.raw-options]
-version_scheme = "guess-next-dev"
+# 릴리즈 워크플로우: git tag vX.Y.Z 직후에만 빌드 → 정확히 X.Y.Z 출력.
+# only_version: tag가 HEAD에 정확히 있을 때만 그 버전 사용. dev 접미사 안 붙음.
+# tag 없거나 tag 이후 커밋이 있으면 fallback-version("0.0.0") 사용.
+# local_scheme=no-local-version: PyPI는 +g{sha} local 버전 미허용.
+version_scheme = "only-version"
 local_scheme = "no-local-version"
 
 [tool.hatch.build.hooks.vcs]
