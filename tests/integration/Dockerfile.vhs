@@ -44,40 +44,31 @@ RUN python3 -m venv /opt/venv \
 ENV PATH="/opt/venv/bin:$PATH"
 
 # 시연용 데이터 미리 생성
-# - infra/, dev/ 두 카테고리 + 검색 시연용 의미 있는 본문
-RUN mkdir -p /root/demo-notes/infra /root/demo-notes/dev \
+# - Notes/, Projects/ 두 카테고리
+# - frontmatter 있는 .md 2개 + 미분류 draft.md 1개
+RUN mkdir -p /root/demo-notes/Notes /root/demo-notes/Projects \
     && printf '%s\n' \
        '---' \
-       'title: Nginx SSL 인증서 적용' \
-       'category: infra' \
-       'tags: [nginx, ssl, certbot]' \
+       'title: Memo' \
+       'category: Notes' \
+       'tags: [test]' \
        '---' \
-       '# Nginx SSL 인증서 적용' \
-       '' \
-       'Lets Encrypt 인증서를 certbot으로 발급받아 Nginx에 적용하는 방법.' \
-       '' \
-       '1. certbot 설치' \
-       '2. 인증서 발급: certbot --nginx -d example.com' \
-       '3. 자동 갱신 설정 확인' \
-       > /root/demo-notes/infra/nginx-ssl.md \
+       '# Memo' \
+       '간단한 메모 본문.' \
+       > /root/demo-notes/Notes/memo.md \
     && printf '%s\n' \
        '---' \
-       'title: Docker Compose 기본' \
-       'category: infra' \
-       'tags: [docker, compose]' \
+       'title: Alpha Project' \
+       'category: Projects' \
+       'tags: [project]' \
        '---' \
-       '# Docker Compose' \
-       '여러 컨테이너를 단일 yaml로 관리.' \
-       > /root/demo-notes/infra/docker-compose.md \
+       '# Alpha' \
+       '프로젝트 메모 본문.' \
+       > /root/demo-notes/Projects/alpha.md \
     && printf '%s\n' \
-       '---' \
-       'title: Python 가상환경' \
-       'category: dev' \
-       'tags: [python, venv]' \
-       '---' \
-       '# Python venv' \
-       'python3 -m venv .venv 로 가상환경 생성.' \
-       > /root/demo-notes/dev/python-venv.md
+       '# Draft' \
+       'frontmatter 없는 미분류 파일.' \
+       > /root/demo-notes/Notes/draft.md
 
 # 임베딩 모델 사전 다운로드
 # 시연 GIF에 'Loading weights: ...' 진행률이 노출되지 않도록 빌드 시점에 캐싱.
