@@ -11,6 +11,8 @@
 
 **Zero-config Personal Knowledge Management(PKM) MCP 서버** — Claude Desktop이 로컬 Markdown 노트를 자동 분류·검색·정리합니다. 설정 파일 없음. 사용자의 폴더 구조를 그대로 따릅니다.
 
+![wiki-search-mcp demo](https://raw.githubusercontent.com/jin7942/wiki-search-mcp/main/docs/assets/demo.gif)
+
 ## 무엇을 할 수 있나
 
 ```text
