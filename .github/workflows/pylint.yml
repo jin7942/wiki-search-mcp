@@ -7,17 +7,24 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10"]
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pylint
-    - name: Analysing the code with pylint
-      run: |
-        pylint $(git ls-files '*.py')
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package + pylint
+        # 패키지를 함께 설치해야 import가 해석됨 (cyclic-import 등 정확 검출)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pylint
+
+      - name: Run pylint
+        # tests/는 pyproject.toml의 ignore-paths로 제외됨.
+        # --fail-under 8.0: 최소 점수 임계값.
+        run: |
+          pylint --rcfile=pyproject.toml --fail-under=8.0 src/wiki_search_mcp/

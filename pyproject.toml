@@ -79,3 +79,28 @@ include = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.pylint.main]
+# 테스트는 검증 로직을 그대로 비교하는 특성상 중복이 자연스러움.
+# tests/는 분석 대상에서 제외.
+ignore-paths = ["tests/.*", "src/wiki_search_mcp/_version.py"]
+
+[tool.pylint."messages control"]
+disable = [
+    # 도메인 모델/검증기 등은 같은 검사 패턴이 반복되는 것이 자연스러움.
+    "duplicate-code",
+    # 한국어 docstring/주석을 자주 사용 → 문서 품질 false-positive 감소
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    # 1인 프로젝트, refactor 항목은 수동 관리
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-locals",
+    "too-many-instance-attributes",
+    "too-many-positional-arguments",
+    "fixme",
+]
+
+[tool.pylint.format]
+max-line-length = 120
