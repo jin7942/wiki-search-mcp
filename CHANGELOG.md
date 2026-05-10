@@ -3,6 +3,30 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.1.1] - 2026-05-10
+
+### Added
+
+- **자동 부트스트랩 인덱싱**: 서버 기동 시 인덱스가 비어있으면 백그라운드에서 자동 full reindex 실행. 사용자가 별도로 CLI 인덱싱 명령을 알아낼 필요 없음.
+- `wiki_stats` 응답에 `bootstrap` 필드 추가 — `state` (`not_started` / `in_progress` / `completed` / `failed` / `skipped`), 실패 시 `error` 노출.
+- MCP `instructions`에 "첫 사용 / 인덱스 부트스트랩" 섹션 추가 — Claude가 `bootstrap.state`를 보고 사용자에게 진행 상황을 안내하도록 가이드.
+
+### Changed
+
+- 인덱스 미존재 시 에러 메시지 개선: `"Index not found. Run wiki_reindex() first."` → `"Index not built yet. The server is auto-indexing in the background; retry shortly. If this persists, run \`wiki-search-mcp index <wiki-path> --full\` once."` (CLI 명령 명시).
+
+### Fixed
+
+- Pylint cyclic-import (`adapters.cli.main` ↔ `adapters.mcp.server`) 해결: 사용되지 않던 `if __name__ == "__main__"` 블록 제거.
+- Pylint 워크플로우 정상화: 패키지 설치 + `src/`만 분석 + `--fail-under=8.0`.
+
+### Internal
+
+- `pyproject.toml`에 `[tool.pylint.*]` 설정 추가 (tests/ 제외, duplicate-code 등 false-positive 비활성화).
+- 부트스트랩 동작 검증 테스트 4개 + `wiki_stats` bootstrap 응답 테스트 2개 추가. 480 passed.
+
+---
+
 ## [0.1.0] - 2026-04-27
 
 PyPI 첫 공개 릴리즈. **Zero-config 자동 분류 PKM MCP 서버**.
