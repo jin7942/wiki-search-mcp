@@ -312,6 +312,30 @@ class TestHandleWikiStats:
         assert data["total_pages"] == 50
         assert "by_category" in data
         assert "by_state" in data
+        # bootstrap_state 미전달 시 응답에 bootstrap 필드 없음
+        assert "bootstrap" not in data
+
+    def test_stats_includes_bootstrap_state(self):
+        """bootstrap_state 전달 시 응답에 포함."""
+        container = _create_mock_container()
+        result = handle_wiki_stats(
+            container, bootstrap_state=("in_progress", None)
+        )
+        data = json.loads(result)
+
+        assert data["bootstrap"]["state"] == "in_progress"
+        assert "error" not in data["bootstrap"]
+
+    def test_stats_includes_bootstrap_error(self):
+        """bootstrap이 failed 상태면 error도 함께 노출."""
+        container = _create_mock_container()
+        result = handle_wiki_stats(
+            container, bootstrap_state=("failed", "disk full")
+        )
+        data = json.loads(result)
+
+        assert data["bootstrap"]["state"] == "failed"
+        assert data["bootstrap"]["error"] == "disk full"
 
 
 class TestHandleWikiReindex:

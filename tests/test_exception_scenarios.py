@@ -41,7 +41,9 @@ class TestSearchServiceEdgeCases:
         result = service.search("test query")
 
         assert result.error is not None
-        assert "Index not found" in result.error
+        # v0.2.0: "Index not found" → "Index not built yet" (자동 부트스트랩 안내)
+        assert "Index not built yet" in result.error
+        assert "wiki-search-mcp index" in result.error
 
     def test_search_with_empty_results(self):
         """검색 결과가 없을 때 빈 리스트 반환."""

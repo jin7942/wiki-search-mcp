@@ -62,7 +62,13 @@ class ValidationService:
                 total=0,
                 issues=[
                     ValidationIssue.of(
-                        "", "no_index", "Index not found. Run wiki_reindex() first."
+                        "",
+                        "no_index",
+                        (
+                            "Index not built yet. The server is auto-indexing in "
+                            "the background; retry shortly. If this persists, run "
+                            "`wiki-search-mcp index <wiki-path> --full` once."
+                        ),
                     )
                 ],
                 stats=stats,

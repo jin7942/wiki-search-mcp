@@ -104,7 +104,11 @@ class SearchService:
                 total_pages=0,
                 query=query,
                 mode=mode,
-                error="Index not found. Run wiki_reindex() first.",
+                error=(
+                    "Index not built yet. The server is auto-indexing in the "
+                    "background; retry shortly. If this persists, run "
+                    "`wiki-search-mcp index <wiki-path> --full` once."
+                ),
             )
 
         # 기본 필터

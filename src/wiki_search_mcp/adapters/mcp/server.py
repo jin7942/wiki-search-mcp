@@ -145,12 +145,20 @@ def get_indexer() -> WikiIndexer:
 # Reindex 동시 실행 방지 Lock
 _reindex_lock = threading.Lock()
 
+# 부트스트랩 진행 상태 (검색/통계 응답에서 사용자에게 노출)
+# "not_started" | "in_progress" | "completed" | "failed" | "skipped"
+_bootstrap_state: str = "not_started"
+_bootstrap_error: str | None = None
 
-def _auto_reindex() -> None:
-    """Watcher에서 호출하는 자동 reindex 함수.
+
+def _auto_reindex(full: bool = False) -> None:
+    """자동 reindex 함수. Watcher와 부트스트랩에서 공통 사용.
 
     동시에 여러 reindex가 실행되는 것을 방지하기 위해 Lock을 사용합니다.
     이미 reindex가 진행 중이면 스킵합니다.
+
+    Args:
+        full: True면 전체 재구축 (부트스트랩용), False면 증분 (watcher용)
     """
     # 이미 reindex 중이면 스킵 (non-blocking)
     if not _reindex_lock.acquire(blocking=False):
@@ -159,9 +167,9 @@ def _auto_reindex() -> None:
 
     try:
         indexer = get_indexer()
-        result = indexer.reindex(full=False)
+        result = indexer.reindex(full=full)
         logger.info(
-            f"Auto-reindex complete: {result['indexed']} pages, "
+            f"Auto-reindex complete (full={full}): {result['indexed']} pages, "
             f"{result['duration_ms']}ms"
         )
         # 캐시 무효화
@@ -171,6 +179,53 @@ def _auto_reindex() -> None:
         logger.error(f"Auto-reindex error: {e}")
     finally:
         _reindex_lock.release()
+
+
+def _bootstrap_index_if_empty() -> None:
+    """서버 기동 시 인덱스가 비어있으면 백그라운드로 자동 인덱싱 실행.
+
+    Read-only 원칙은 사용자 wiki 데이터를 변경하지 않는다는 의미이며,
+    내부 인덱스 DB(LanceDB/BM25/graph)는 도구 자체의 상태이므로
+    자동 빌드해도 원칙 위반이 아닙니다.
+
+    동작:
+    - 인덱스가 이미 존재 (vector store 테이블 있음) → 스킵
+    - 비어있음 → 백그라운드 스레드로 full reindex 시작
+    """
+    global _bootstrap_state, _bootstrap_error
+
+    try:
+        container = get_container()
+        if container.vector_repository.exists():
+            logger.info("Index already exists; skipping bootstrap")
+            _bootstrap_state = "skipped"
+            return
+    except Exception as e:
+        logger.warning(f"Bootstrap check failed: {e}; proceeding with bootstrap")
+
+    _bootstrap_state = "in_progress"
+    logger.info("Index empty; starting background bootstrap reindex (full)")
+
+    def _run():
+        global _bootstrap_state, _bootstrap_error
+        try:
+            _auto_reindex(full=True)
+            _bootstrap_state = "completed"
+            logger.info("Bootstrap reindex completed")
+        except Exception as e:
+            _bootstrap_state = "failed"
+            _bootstrap_error = str(e)
+            logger.error(f"Bootstrap reindex failed: {e}")
+
+    thread = threading.Thread(
+        target=_run, name="wiki-bootstrap-reindex", daemon=True
+    )
+    thread.start()
+
+
+def get_bootstrap_state() -> tuple[str, str | None]:
+    """현재 부트스트랩 상태 반환. (state, error_message)"""
+    return _bootstrap_state, _bootstrap_error
 
 
 def start_watcher() -> bool:
@@ -293,12 +348,17 @@ def wiki_reindex(full: bool = False) -> str:
 def wiki_stats() -> str:
     """Wiki 통계를 조회합니다.
 
-    전체 페이지 수, 카테고리별/상태별 분포, 마지막 인덱싱 시간을 반환합니다.
+    전체 페이지 수, 카테고리별/상태별 분포, 마지막 인덱싱 시간,
+    그리고 자동 부트스트랩 인덱싱 진행 상태를 반환합니다.
 
     Returns:
-        통계 JSON 문자열
+        통계 JSON 문자열. ``bootstrap.state`` 필드는 다음 중 하나:
+        ``not_started`` | ``in_progress`` | ``completed`` | ``failed`` | ``skipped``.
     """
-    return handle_wiki_stats(container=get_container())
+    return handle_wiki_stats(
+        container=get_container(),
+        bootstrap_state=get_bootstrap_state(),
+    )
 
 
 @mcp.tool()
@@ -556,6 +616,9 @@ def main(options: ServerOptions) -> None:
     # 파일 감시 시작
     start_watcher()
 
+    # 인덱스 비어있으면 백그라운드 자동 인덱싱 (첫 사용 UX 개선)
+    _bootstrap_index_if_empty()
+
     # 종료 시 정리
     atexit.register(stop_watcher)
 
@@ -563,8 +626,5 @@ def main(options: ServerOptions) -> None:
     mcp.run()
 
 
-if __name__ == "__main__":
-    # 직접 실행은 CLI 위임 (인자 파싱을 위해)
-    from wiki_search_mcp.adapters.cli.main import main as cli_main
-
-    cli_main()
+# 직접 실행 (`python -m wiki_search_mcp.adapters.mcp.server`)은 인자 파싱이 필요해
+# 지원하지 않습니다. 항상 CLI 진입점(`wiki-search-mcp serve <path>`)을 사용하세요.

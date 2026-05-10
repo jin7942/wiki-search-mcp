@@ -7,6 +7,7 @@ v0.7.0: ServiceContainer 기반 구조로 마이그레이션됨.
 """
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -462,3 +463,88 @@ class TestWikiSearchWithFilters:
             # filters 객체에서 confidence_min 확인
             filters = call_args.kwargs.get("filters")
             assert filters.confidence_min <= 100
+
+
+class TestBootstrapIndexing:
+    """자동 부트스트랩 인덱싱 동작 검증.
+
+    서버 기동 시 인덱스가 비어있으면 백그라운드로 자동 인덱싱이 시작되어야 함.
+    이미 인덱스가 있으면 스킵.
+    """
+
+    def _reset_bootstrap_state(self):
+        """테스트 격리를 위해 부트스트랩 상태 초기화."""
+        server_module._bootstrap_state = "not_started"
+        server_module._bootstrap_error = None
+
+    def test_skips_when_index_exists(self):
+        """인덱스가 이미 존재하면 부트스트랩을 시작하지 않음."""
+        self._reset_bootstrap_state()
+        mock_container = MagicMock()
+        mock_container.vector_repository.exists.return_value = True
+
+        with patch.object(server_module, "get_container", return_value=mock_container):
+            server_module._bootstrap_index_if_empty()
+
+        state, err = server_module.get_bootstrap_state()
+        assert state == "skipped"
+        assert err is None
+
+    def test_starts_when_index_empty(self):
+        """인덱스가 비어있으면 백그라운드 스레드로 부트스트랩 시작 후 완료."""
+        self._reset_bootstrap_state()
+
+        mock_container = MagicMock()
+        mock_container.vector_repository.exists.return_value = False
+
+        # _auto_reindex가 동기적으로 끝나도록 mock 처리
+        with patch.object(
+            server_module, "get_container", return_value=mock_container
+        ), patch.object(
+            server_module, "_auto_reindex"
+        ) as mock_reindex:
+            server_module._bootstrap_index_if_empty()
+
+            # 백그라운드 스레드 종료 대기
+            for thread in threading.enumerate():
+                if thread.name == "wiki-bootstrap-reindex":
+                    thread.join(timeout=2.0)
+
+            mock_reindex.assert_called_once_with(full=True)
+
+        state, err = server_module.get_bootstrap_state()
+        assert state == "completed"
+        assert err is None
+
+    def test_records_error_on_failure(self):
+        """부트스트랩 reindex 실패 시 state=failed + error 기록."""
+        self._reset_bootstrap_state()
+
+        mock_container = MagicMock()
+        mock_container.vector_repository.exists.return_value = False
+
+        def _boom(full: bool = False):
+            raise RuntimeError("disk error")
+
+        with patch.object(
+            server_module, "get_container", return_value=mock_container
+        ), patch.object(
+            server_module, "_auto_reindex", side_effect=_boom
+        ):
+            server_module._bootstrap_index_if_empty()
+
+            for thread in threading.enumerate():
+                if thread.name == "wiki-bootstrap-reindex":
+                    thread.join(timeout=2.0)
+
+        state, err = server_module.get_bootstrap_state()
+        assert state == "failed"
+        assert err is not None
+        assert "disk error" in err
+
+    def test_get_bootstrap_state_default(self):
+        """초기 상태는 not_started."""
+        self._reset_bootstrap_state()
+        state, err = server_module.get_bootstrap_state()
+        assert state == "not_started"
+        assert err is None

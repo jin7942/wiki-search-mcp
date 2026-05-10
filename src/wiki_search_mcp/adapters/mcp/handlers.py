@@ -513,11 +513,16 @@ def handle_wiki_validate(container: "ServiceContainer") -> str:
 # =============================================================================
 
 
-def handle_wiki_stats(container: "ServiceContainer") -> str:
+def handle_wiki_stats(
+    container: "ServiceContainer",
+    bootstrap_state: tuple[str, str | None] | None = None,
+) -> str:
     """Wiki 통계 조회 핸들러.
 
     Args:
         container: 서비스 컨테이너
+        bootstrap_state: (state, error_message) — 자동 부트스트랩 진행 상태.
+            None이면 응답에 포함되지 않음.
 
     Returns:
         통계 JSON 문자열
@@ -525,7 +530,13 @@ def handle_wiki_stats(container: "ServiceContainer") -> str:
     try:
         # 서비스 호출
         stats = container.stats_service.get_stats()
-        return _json_response(stats.to_dict())
+        result = stats.to_dict()
+        if bootstrap_state is not None:
+            state, err = bootstrap_state
+            result["bootstrap"] = {"state": state}
+            if err is not None:
+                result["bootstrap"]["error"] = err
+        return _json_response(result)
 
     except BusinessException as e:
         logger.warning(f"wiki_stats business error: {e}")
