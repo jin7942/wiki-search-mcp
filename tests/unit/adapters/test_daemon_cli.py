@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from wiki_search_mcp.adapters.cli.main import main
+from wiki_search_mcp.adapters.cli import daemon_cli
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +47,73 @@ def test_stop_when_not_running(tmp_path: Path) -> None:
     result = runner.invoke(main, ["daemon", "stop", str(wiki)])
     assert result.exit_code != 0
     assert "실행 중이 아닙니다" in result.output
+
+
+def test_resolve_wiki_path_from_explicit_arg(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    resolved = daemon_cli._resolve_wiki_path(str(wiki))
+    assert resolved == wiki.resolve()
+
+
+def test_resolve_wiki_path_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    wiki = tmp_path / "vault"
+    wiki.mkdir()
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "wiki-search": {
+                        "command": "wiki-search-mcp",
+                        "args": ["serve", str(wiki)],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(daemon_cli, "_CONFIG_LOCATIONS", (cfg,))
+    resolved = daemon_cli._resolve_wiki_path(None)
+    assert resolved == wiki.resolve()
+
+
+def test_resolve_wiki_path_raises_when_no_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(daemon_cli, "_CONFIG_LOCATIONS", (tmp_path / "missing.json",))
+    with pytest.raises(click.ClickException) as exc:
+        daemon_cli._resolve_wiki_path(None)
+    assert "wiki 경로를 찾을 수 없습니다" in exc.value.message
+
+
+def test_resolve_wiki_path_raises_when_config_missing_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    monkeypatch.setattr(daemon_cli, "_CONFIG_LOCATIONS", (cfg,))
+    with pytest.raises(click.ClickException):
+        daemon_cli._resolve_wiki_path(None)
+
+
+def test_status_without_arg_uses_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    wiki = tmp_path / "vault"
+    wiki.mkdir()
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "wiki-search": {"command": "wiki-search-mcp", "args": ["serve", str(wiki)]}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(daemon_cli, "_CONFIG_LOCATIONS", (cfg,))
+    runner = CliRunner()
+    result = runner.invoke(main, ["daemon", "status"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["alive"] is False
+    assert Path(data["wiki_path"]) == wiki.resolve()
 
 
 def test_start_foreground_invokes_runner(tmp_path: Path) -> None:

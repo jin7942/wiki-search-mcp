@@ -31,6 +31,73 @@ from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
 from wiki_search_mcp.infrastructure.daemon.statefile import StatusFile
 
 # -----------------------------------------------------------------------------
+# Wiki 경로 자동 탐지 (claude_desktop_config.json 재사용)
+# -----------------------------------------------------------------------------
+
+_CONFIG_LOCATIONS = (
+    Path.home() / ".claude" / "claude_desktop_config.json",
+    Path.home() / ".config" / "claude" / "claude_desktop_config.json",
+)
+_SERVER_NAME = "wiki-search"
+
+
+def _find_claude_config_file() -> Path | None:
+    for p in _CONFIG_LOCATIONS:
+        if p.exists():
+            return p
+    return None
+
+
+def _wiki_path_from_config() -> Path | None:
+    """``claude_desktop_config.json``에서 wiki-search 서버 wiki 경로 추출.
+
+    args 구조: ``["serve", "<wiki_path>", ...]``. 첫 위치 인자(serve 다음)를 사용.
+    config 미존재 / 등록 서버 없음 / args 비정상 → ``None``.
+    """
+    cfg = _find_claude_config_file()
+    if cfg is None:
+        return None
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    servers = data.get("mcpServers") or {}
+    server = servers.get(_SERVER_NAME)
+    if not isinstance(server, dict):
+        return None
+    args = server.get("args")
+    if not isinstance(args, list) or len(args) < 2:
+        return None
+    # 첫 인자는 'serve' (또는 다른 명령일 수도 있음). 두 번째가 wiki 경로.
+    candidate = args[1]
+    if not isinstance(candidate, str):
+        return None
+    p = Path(candidate).expanduser()
+    return p if p.exists() else None
+
+
+def _resolve_wiki_path(arg: str | None) -> Path:
+    """위치 인자(또는 ``None``) → 절대 경로 ``Path``.
+
+    인자 미지정 시 claude_desktop_config.json에서 자동 탐지.
+    탐지 실패 시 친절한 안내와 함께 ``ClickException``.
+    """
+    if arg:
+        p = Path(arg).expanduser().resolve()
+        if not p.exists():
+            raise click.ClickException(f"경로가 존재하지 않습니다: {p}")
+        return p
+    detected = _wiki_path_from_config()
+    if detected is None:
+        raise click.ClickException(
+            "wiki 경로를 찾을 수 없습니다.\n"
+            "다음 중 하나를 사용하세요:\n"
+            "  1) 인자로 명시: wiki-search-mcp daemon <command> <path>\n"
+            "  2) 먼저 등록:   wiki-search-mcp config <path>"
+        )
+    return detected.resolve()
+
+# -----------------------------------------------------------------------------
 # 사전 검증
 # -----------------------------------------------------------------------------
 
@@ -154,7 +221,7 @@ def daemon() -> None:
 
 
 @daemon.command("start")
-@click.argument("wiki_path", type=click.Path(exists=True))
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
 @click.option("--llm-model", default="haiku", show_default=True, help='Claude 모델 alias 또는 풀 ID')
 @click.option("--confidence-threshold", type=float, default=0.70, show_default=True)
 @click.option("--concurrency", type=int, default=2, show_default=True)
@@ -170,9 +237,13 @@ def daemon() -> None:
     default="INFO",
     show_default=True,
 )
-def start(wiki_path: str, **kw: object) -> None:
-    """Wiki 폴더를 감시하며 LLM으로 자동 분류하는 daemon을 시작합니다."""
-    wiki = Path(wiki_path).resolve()
+def start(wiki_path: str | None, **kw: object) -> None:
+    """Wiki 폴더를 감시하며 LLM으로 자동 분류하는 daemon을 시작합니다.
+
+    WIKI_PATH는 선택입니다. 생략 시 ``claude_desktop_config.json``의 ``wiki-search``
+    서버 등록 정보에서 자동으로 경로를 가져옵니다 (``wiki-search-mcp config`` 결과 재사용).
+    """
+    wiki = _resolve_wiki_path(wiki_path)
     _check_claude_cli_or_die()
     _check_claude_logged_in_or_hint()
 
@@ -231,11 +302,14 @@ def start(wiki_path: str, **kw: object) -> None:
 
 
 @daemon.command("stop")
-@click.argument("wiki_path", type=click.Path(exists=True))
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
 @click.option("--timeout", type=float, default=10.0, show_default=True)
-def stop(wiki_path: str, timeout: float) -> None:
-    """실행 중인 daemon을 종료합니다 (SIGTERM → 10초 후 SIGKILL)."""
-    wiki = Path(wiki_path).resolve()
+def stop(wiki_path: str | None, timeout: float) -> None:
+    """실행 중인 daemon을 종료합니다 (SIGTERM → 10초 후 SIGKILL).
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    wiki = _resolve_wiki_path(wiki_path)
     alive, pid = PidLock.is_alive(pid_file(wiki))
     if not alive or pid is None:
         raise click.ClickException("daemon이 실행 중이 아닙니다.")
@@ -251,10 +325,13 @@ def stop(wiki_path: str, timeout: float) -> None:
 
 
 @daemon.command("status")
-@click.argument("wiki_path", type=click.Path(exists=True))
-def status(wiki_path: str) -> None:
-    """daemon 상태를 JSON으로 출력."""
-    wiki = Path(wiki_path).resolve()
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
+def status(wiki_path: str | None) -> None:
+    """daemon 상태를 JSON으로 출력.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    wiki = _resolve_wiki_path(wiki_path)
     alive, pid = PidLock.is_alive(pid_file(wiki))
     state = StatusFile(status_file(wiki)).read() or {}
     payload = {
@@ -268,12 +345,15 @@ def status(wiki_path: str) -> None:
 
 
 @daemon.command("logs")
-@click.argument("wiki_path", type=click.Path(exists=True))
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
 @click.option("-n", "--lines", default=50, show_default=True, help="마지막 N줄")
 @click.option("-f", "--follow", is_flag=True, help="실시간 출력")
-def logs(wiki_path: str, lines: int, follow: bool) -> None:
-    """daemon 로그를 표시 (tail / tail -f)."""
-    wiki = Path(wiki_path).resolve()
+def logs(wiki_path: str | None, lines: int, follow: bool) -> None:
+    """daemon 로그를 표시 (tail / tail -f).
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    wiki = _resolve_wiki_path(wiki_path)
     path = log_file(wiki)
     if not path.exists():
         raise click.ClickException(f"로그 파일 없음: {path}")
@@ -305,13 +385,16 @@ def logs(wiki_path: str, lines: int, follow: bool) -> None:
 
 
 @daemon.command("rollback")
-@click.argument("wiki_path", type=click.Path(exists=True))
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
 @click.option("--last", "last_n", type=int, default=1, show_default=True, help="마지막 N개 적용 되돌리기")
 @click.option("--dry-run", is_flag=True, help="실제 변경 없이 영향만 표시")
 @click.option("--force", is_flag=True, help="daemon이 실행 중이어도 진행")
-def rollback(wiki_path: str, last_n: int, dry_run: bool, force: bool) -> None:
-    """applied.jsonl의 마지막 N개 적용을 역재생합니다."""
-    wiki = Path(wiki_path).resolve()
+def rollback(wiki_path: str | None, last_n: int, dry_run: bool, force: bool) -> None:
+    """applied.jsonl의 마지막 N개 적용을 역재생합니다.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    wiki = _resolve_wiki_path(wiki_path)
     alive, pid = PidLock.is_alive(pid_file(wiki))
     if alive and not force:
         raise click.ClickException(

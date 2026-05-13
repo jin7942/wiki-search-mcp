@@ -60,19 +60,21 @@ wiki-search-mcp config ~/my-notes
 # 0. (1회) 사용자 Claude 구독으로 로그인 — API 키 없이 OAuth 재활용
 claude login
 
-# 1. daemon 시작 (기본 confidence ≥ 0.7만 자동 적용, 그 외는 pending)
-wiki-search-mcp daemon start ~/my-notes
+# 1. daemon 시작 — 경로 생략하면 config 등록 정보 자동 사용 (v0.2.1+)
+wiki-search-mcp daemon start
 
 # 2. 상태/로그
-wiki-search-mcp daemon status ~/my-notes
-wiki-search-mcp daemon logs ~/my-notes -f
+wiki-search-mcp daemon status
+wiki-search-mcp daemon logs -f
 
 # 3. 자동 적용 되돌리기
-wiki-search-mcp daemon rollback ~/my-notes --last 5 --dry-run
+wiki-search-mcp daemon rollback --last 5 --dry-run
 
 # 4. 종료
-wiki-search-mcp daemon stop ~/my-notes
+wiki-search-mcp daemon stop
 ```
+
+> 명시적으로 경로를 지정하려면 ``daemon <command> <path>`` 형식을 사용할 수 있습니다 (여러 wiki 보유 시).
 
 - 인증: 사용자가 이미 결제한 Claude Pro/Max 구독을 그대로 사용 (Anthropic API 키 등록 불필요).
 - 신뢰성: 적용 전 frontmatter/경로를 ``applied.jsonl``에 기록 → ``daemon rollback``으로 한 번에 되돌릴 수 있음.
@@ -168,17 +170,22 @@ wiki-search-mcp serve ~/my-notes
 wiki-search-mcp serve ~/my-notes --log-level DEBUG --no-watch
 ```
 
-### `daemon <subcommand> <path>` (v0.2.0)
+### `daemon <subcommand> [path]` (v0.2.0+)
 
 백그라운드 자동 분류 daemon. ``claude login`` OAuth를 재활용하므로 별도 API 키 등록이 필요 없습니다.
 
+**경로 인자는 선택입니다.** 생략 시 ``wiki-search-mcp config``로 등록된 wiki-search 서버의 경로를 자동 사용합니다. 여러 wiki를 사용하는 경우만 명시적으로 인자를 전달하세요.
+
 ```bash
-wiki-search-mcp daemon start ~/my-notes   # 백그라운드 시작
-wiki-search-mcp daemon start ~/my-notes --foreground   # 디버깅용
-wiki-search-mcp daemon status ~/my-notes  # 상태 JSON
-wiki-search-mcp daemon logs ~/my-notes -f # 로그 tail
-wiki-search-mcp daemon stop ~/my-notes    # SIGTERM → 10초 후 SIGKILL
-wiki-search-mcp daemon rollback ~/my-notes --last 5  # 최근 5개 적용 되돌리기
+wiki-search-mcp daemon start              # 백그라운드 시작 (경로 자동 탐지)
+wiki-search-mcp daemon start --foreground # 디버깅용
+wiki-search-mcp daemon status             # 상태 JSON
+wiki-search-mcp daemon logs -f            # 로그 tail
+wiki-search-mcp daemon stop               # SIGTERM → 10초 후 SIGKILL
+wiki-search-mcp daemon rollback --last 5  # 최근 5개 적용 되돌리기
+
+# 명시적 경로 지정도 가능
+wiki-search-mcp daemon start ~/another-vault
 ```
 
 주요 옵션 (start):

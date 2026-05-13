@@ -3,6 +3,27 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.1] - 2026-05-13
+
+### Changed
+
+- **daemon 명령의 `<wiki_path>` 인자를 선택적으로 변경**. 생략 시 ``claude_desktop_config.json``의 ``wiki-search`` 서버 등록 정보에서 wiki 경로를 자동 탐지한다. 사용자가 ``wiki-search-mcp config <path>``로 이미 등록한 경로를 재사용하므로 같은 경로를 두 번 입력할 필요가 없다.
+
+```bash
+wiki-search-mcp config ~/my-notes    # 1회 등록
+wiki-search-mcp daemon start          # 경로 인자 생략 — config 정보 자동 사용
+wiki-search-mcp daemon status
+wiki-search-mcp daemon stop
+```
+
+명시적으로 경로를 지정하면 (예: 여러 wiki 보유 시) 그쪽이 우선한다.
+
+### Internal
+
+- `daemon_cli._resolve_wiki_path` 헬퍼 추가. 단위 테스트 5개 추가.
+
+---
+
 ## [0.2.0] - 2026-05-13
 
 ### Added
