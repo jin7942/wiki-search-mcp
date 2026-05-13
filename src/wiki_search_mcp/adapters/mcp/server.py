@@ -344,21 +344,81 @@ def wiki_reindex(full: bool = False) -> str:
     )
 
 
+def _read_daemon_status() -> dict | None:
+    """daemon status 파일을 읽어 dict 반환. 미존재면 ``None``."""
+    try:
+        from wiki_search_mcp.infrastructure.daemon import StatusFile, status_file
+        from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
+        from wiki_search_mcp.infrastructure.daemon.paths import pid_file as _pid
+
+        opts = _require_options()
+        data = StatusFile(status_file(opts.wiki_path)).read() or {}
+        alive, pid = PidLock.is_alive(_pid(opts.wiki_path))
+        if not data and not alive:
+            return {"state": "not_running", "alive": False, "pid": None}
+        return {**data, "alive": alive, "pid": pid}
+    except Exception:  # noqa: BLE001 - daemon 상태 조회 실패는 stats 응답을 막아서는 안 됨
+        return None
+
+
+def _read_daemon_pending(limit: int = 50) -> list[dict] | None:
+    """daemon pending.jsonl의 active entries를 path별 최신 1개만 반환."""
+    try:
+        from wiki_search_mcp.infrastructure.daemon import applied_jsonl, pending_jsonl
+        from wiki_search_mcp.infrastructure.jsonl.log import JsonlLog
+
+        opts = _require_options()
+        pending = JsonlLog(pending_jsonl(opts.wiki_path))
+        applied = JsonlLog(applied_jsonl(opts.wiki_path))
+        latest_pending: dict[str, dict] = {}
+        for entry in pending.scan():
+            path = entry.get("path")
+            if isinstance(path, str):
+                latest_pending[path] = entry
+        applied_paths: set[str] = set()
+        for entry in applied.scan():
+            for key in ("path_before", "path_after"):
+                v = entry.get(key)
+                if isinstance(v, str):
+                    applied_paths.add(v)
+        items = [e for p, e in latest_pending.items() if p not in applied_paths]
+        items.sort(key=lambda e: e.get("recorded_at", ""), reverse=True)
+        return items[:limit]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @mcp.tool()
 def wiki_stats() -> str:
     """Wiki 통계를 조회합니다.
 
     전체 페이지 수, 카테고리별/상태별 분포, 마지막 인덱싱 시간,
-    그리고 자동 부트스트랩 인덱싱 진행 상태를 반환합니다.
+    자동 부트스트랩 진행 상태, daemon 상태를 함께 반환합니다.
 
     Returns:
         통계 JSON 문자열. ``bootstrap.state`` 필드는 다음 중 하나:
         ``not_started`` | ``in_progress`` | ``completed`` | ``failed`` | ``skipped``.
+        ``daemon`` 필드는 daemon 미실행 시 ``{"state": "not_running"}`` 형태.
     """
     return handle_wiki_stats(
         container=get_container(),
         bootstrap_state=get_bootstrap_state(),
+        daemon_status=_read_daemon_status(),
     )
+
+
+@mcp.tool()
+def wiki_daemon_status() -> str:
+    """자동 분류 daemon의 현재 상태를 조회합니다.
+
+    Returns:
+        JSON: ``{state, alive, pid, started_at, applied_count, pending_count, ...}``.
+        daemon이 실행 중이 아니면 ``{state: not_running}``.
+    """
+    from wiki_search_mcp.adapters.mcp.handlers import handle_wiki_daemon_status
+
+    opts = _require_options()
+    return handle_wiki_daemon_status(opts.wiki_path)
 
 
 @mcp.tool()
@@ -562,16 +622,21 @@ def wiki_pending(limit: int = 20) -> str:
 
     인덱스에서 frontmatter가 빈약하거나 category가 누락된 문서,
     그리고 디스크에는 있지만 아직 인덱싱되지 않은 신규 .md 파일을
-    합쳐 반환합니다.
+    합쳐 반환합니다. daemon이 실행 중이면 daemon의 ``pending.jsonl``에
+    쌓인 항목을 함께 머지하여 우선 노출합니다.
 
     Args:
         limit: 최대 반환 개수 (1-200, 기본값: 20)
 
     Returns:
-        {items: [{path, reason, mtime}, ...], count} JSON 문자열
-        reason은 'not_indexed', 'no_frontmatter', 'no_category' 중 하나
+        ``{items: [...], count}`` JSON. 각 item은 ``source`` (``"daemon"`` 또는
+        ``"index"``)와 함께 daemon 항목인 경우 ``reason``, ``decision`` 포함.
     """
-    return handle_wiki_pending(container=get_container(), limit=limit)
+    return handle_wiki_pending(
+        container=get_container(),
+        limit=limit,
+        daemon_pending=_read_daemon_pending(limit=limit),
+    )
 
 
 @mcp.tool()

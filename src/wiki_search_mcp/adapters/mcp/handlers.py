@@ -516,6 +516,7 @@ def handle_wiki_validate(container: "ServiceContainer") -> str:
 def handle_wiki_stats(
     container: "ServiceContainer",
     bootstrap_state: tuple[str, str | None] | None = None,
+    daemon_status: dict | None = None,
 ) -> str:
     """Wiki 통계 조회 핸들러.
 
@@ -523,6 +524,7 @@ def handle_wiki_stats(
         container: 서비스 컨테이너
         bootstrap_state: (state, error_message) — 자동 부트스트랩 진행 상태.
             None이면 응답에 포함되지 않음.
+        daemon_status: daemon 상태 dict. None이면 응답에 포함 안 됨.
 
     Returns:
         통계 JSON 문자열
@@ -536,6 +538,8 @@ def handle_wiki_stats(
             result["bootstrap"] = {"state": state}
             if err is not None:
                 result["bootstrap"]["error"] = err
+        if daemon_status is not None:
+            result["daemon"] = daemon_status
         return _json_response(result)
 
     except BusinessException as e:
@@ -800,12 +804,18 @@ def handle_wiki_suggest_categories(
         return _json_error("Internal error")
 
 
-def handle_wiki_pending(container: "ServiceContainer", limit: int = 20) -> str:
+def handle_wiki_pending(
+    container: "ServiceContainer",
+    limit: int = 20,
+    daemon_pending: list[dict] | None = None,
+) -> str:
     """미분류 / 정리 대기 파일 목록 핸들러.
 
     Args:
         container: 서비스 컨테이너
         limit: 최대 반환 개수
+        daemon_pending: daemon이 pending.jsonl에 쌓아둔 active entry 목록.
+            None이 아니면 ClassificationService 결과 앞에 머지하고 중복 path 제거.
 
     Returns:
         pending 목록 JSON 문자열
@@ -817,12 +827,25 @@ def handle_wiki_pending(container: "ServiceContainer", limit: int = 20) -> str:
             return _json_error(str(e))
 
         pending = container.classification_service.find_pending(limit=limit)
-        return _json_response(
-            {
-                "items": [item.to_dict() for item in pending],
-                "count": len(pending),
-            }
-        )
+        items: list[dict] = []
+        seen_paths: set[str] = set()
+        if daemon_pending:
+            for entry in daemon_pending:
+                path = entry.get("path")
+                if not isinstance(path, str) or path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                items.append({**entry, "source": "daemon"})
+        for item in pending:
+            d = item.to_dict()
+            if d.get("path") in seen_paths:
+                continue
+            seen_paths.add(d["path"])
+            items.append({**d, "source": "index"})
+            if len(items) >= limit:
+                break
+
+        return _json_response({"items": items[:limit], "count": len(items[:limit])})
 
     except BusinessException as e:
         logger.warning(f"wiki_pending business error: {e}")
@@ -836,6 +859,42 @@ def handle_wiki_pending(container: "ServiceContainer", limit: int = 20) -> str:
     except Exception as e:
         logger.exception(f"wiki_pending unexpected error: {e}")
         return _json_error("Internal error")
+
+
+def handle_wiki_daemon_status(
+    wiki_path,
+    status_reader=None,
+    pid_checker=None,
+) -> str:
+    """Daemon 상태 조회 핸들러.
+
+    Args:
+        wiki_path: wiki 루트 ``Path``
+        status_reader: ``StatusFile`` 인스턴스 또는 ``None`` (None이면 즉석 생성)
+        pid_checker: 테스트 주입용 hook ``Callable[[Path], tuple[bool, int | None]]``
+
+    Returns:
+        ``{state, alive, pid, applied_count, pending_count, ...}`` JSON.
+        오류가 나도 raise하지 않고 ``state=unknown``으로 응답.
+    """
+    try:
+        from wiki_search_mcp.infrastructure.daemon import (
+            StatusFile,
+            pid_file,
+            status_file,
+        )
+        from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
+
+        reader = status_reader if status_reader is not None else StatusFile(status_file(wiki_path))
+        state_data = reader.read() or {}
+        checker = pid_checker if pid_checker is not None else PidLock.is_alive
+        alive, pid = checker(pid_file(wiki_path))
+        if not state_data and not alive:
+            return _json_response({"state": "not_running", "alive": False, "pid": None})
+        return _json_response({**state_data, "alive": alive, "pid": pid})
+    except Exception as e:  # noqa: BLE001 - status는 절대 raise하면 안 됨
+        logger.exception("wiki_daemon_status unexpected error: %s", e)
+        return _json_response({"state": "unknown", "error": str(e)[:200]})
 
 
 def handle_wiki_suggest_classification(
