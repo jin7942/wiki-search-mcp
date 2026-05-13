@@ -3,6 +3,36 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.0] - 2026-05-13
+
+### Added
+
+- **백그라운드 자동 분류 daemon**: `wiki-search-mcp daemon start <wiki>` 한 줄로 새 .md 파일 감지 → Claude Agent SDK로 분류 → frontmatter 자동 작성 + 카테고리 폴더 이동까지 자율 수행. Claude Desktop이 꺼져 있어도 동작.
+- **LLM Provider 추상화** (`services/llm/`): Protocol 인터페이스 + `ClaudeCodeProvider` 구현. 사용자 ``claude login`` OAuth를 재활용하므로 **API 키 등록 불필요, 추가 비용 0**. Anthropic API Provider는 v0.3.0 예약.
+- **Confidence 임계값 기반 분기**: ``--confidence-threshold`` (기본 0.7) 이상이면 자동 적용, 미달은 ``pending.jsonl``에 적재 → MCP ``wiki_pending``이 우선 노출.
+- **Rate limit 보호**: 분/시/일 sliding window (기본 5/100/500). 사용자의 인터랙티브 Claude 사용 한도를 daemon이 잠식하지 않도록.
+- **CLI 명령**: ``daemon start / stop / status / logs / rollback``. PID 파일 + ``fcntl flock``으로 단일 인스턴스 보장.
+- **Rollback**: ``applied.jsonl``에 적용 전 frontmatter + 원래 경로 저장 → ``daemon rollback --last N``으로 역재생.
+- **MCP 신규 도구 `wiki_daemon_status`**: daemon 상태(state/alive/applied_count/pending_count 등) JSON 노출.
+- **Atomic frontmatter writer**: tmp → fsync → rename. 사용자 값 우선 머지 (이미 작성된 category/tags는 절대 덮어쓰지 않음).
+- **JSON Lines audit log**: ``pending.jsonl`` / ``applied.jsonl`` append-only + 동시 read 안전.
+
+### Changed
+
+- `wiki_pending`: daemon의 ``pending.jsonl`` active 항목을 ClassificationService 결과 앞에 머지. 각 item에 ``source`` 필드 추가 (``"daemon"`` 또는 ``"index"``).
+- `wiki_stats`: 응답에 ``daemon`` 서브트리 추가. daemon 미실행 시 ``{"state": "not_running"}``.
+
+### Dependencies
+
+- `claude-agent-sdk>=0.1.81` 추가 (Claude Code CLI는 wheel에 번들).
+
+### Tests
+
+- 단위 테스트 54개 + 격리 환경 통합 테스트 4개 추가. 총 538 passed.
+- 격리 환경 (별도 venv + ``XDG_STATE_HOME`` 분리) 에서 daemon 라이프사이클 / 자동 분류 적용 / pending 적재 / rollback / healthcheck 실패 시나리오 모두 검증.
+
+---
+
 ## [0.1.1] - 2026-05-10
 
 ### Added

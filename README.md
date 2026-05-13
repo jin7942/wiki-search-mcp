@@ -52,6 +52,33 @@ wiki-search-mcp config ~/my-notes
 
 빈 디렉토리든 기존 노트 디렉토리든 가리키기만 하면 됩니다. 첫 검색 시 자동으로 인덱스가 생성되고, 이후엔 watcher가 변경을 감지합니다.
 
+## v0.2.0 — 자동 분류 Daemon (선택)
+
+새로 작성한 .md 파일을 사용자 개입 없이 분류하고 카테고리 폴더로 옮겨놓는 백그라운드 daemon을 도입했습니다. Claude Desktop이 꺼져 있어도 동작합니다.
+
+```bash
+# 0. (1회) 사용자 Claude 구독으로 로그인 — API 키 없이 OAuth 재활용
+claude login
+
+# 1. daemon 시작 (기본 confidence ≥ 0.7만 자동 적용, 그 외는 pending)
+wiki-search-mcp daemon start ~/my-notes
+
+# 2. 상태/로그
+wiki-search-mcp daemon status ~/my-notes
+wiki-search-mcp daemon logs ~/my-notes -f
+
+# 3. 자동 적용 되돌리기
+wiki-search-mcp daemon rollback ~/my-notes --last 5 --dry-run
+
+# 4. 종료
+wiki-search-mcp daemon stop ~/my-notes
+```
+
+- 인증: 사용자가 이미 결제한 Claude Pro/Max 구독을 그대로 사용 (Anthropic API 키 등록 불필요).
+- 신뢰성: 적용 전 frontmatter/경로를 ``applied.jsonl``에 기록 → ``daemon rollback``으로 한 번에 되돌릴 수 있음.
+- 안전: 사용자가 이미 작성한 frontmatter 필드는 절대 덮어쓰지 않음 (사용자 값 우선 머지).
+- 한도 보호: 분당 5회 / 시간당 100회 / 일일 500회 sliding window 기본값. ``--rate-per-*`` 옵션으로 조정.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
@@ -83,7 +110,7 @@ wiki-search-mcp config ~/my-notes
 
 ## MCP Tools
 
-총 15개 도구. **모두 read-only** — 파일 쓰기는 Claude의 일반 도구가 담당.
+총 16개 도구. **모두 read-only** — 파일 쓰기는 daemon(선택) 또는 Claude의 일반 도구가 담당.
 
 | 분류 | 도구 | 설명 |
 |------|------|------|
@@ -101,6 +128,7 @@ wiki-search-mcp config ~/my-notes
 | 분류 | `wiki_suggest_tags` | 태그 자동 추출 |
 | 관리 | `wiki_reindex` | 인덱스 재구축 |
 | 관리 | `wiki_watch_status` | 파일 감시 상태 |
+| 관리 | `wiki_daemon_status` | 자동 분류 daemon 상태 (v0.2.0) |
 | 관리 | `wiki_validate` | frontmatter / wikilink 검증 |
 
 상세 사용법: [API Reference](docs/API.md)
@@ -139,6 +167,26 @@ MCP 서버 직접 실행 (디버깅용).
 wiki-search-mcp serve ~/my-notes
 wiki-search-mcp serve ~/my-notes --log-level DEBUG --no-watch
 ```
+
+### `daemon <subcommand> <path>` (v0.2.0)
+
+백그라운드 자동 분류 daemon. ``claude login`` OAuth를 재활용하므로 별도 API 키 등록이 필요 없습니다.
+
+```bash
+wiki-search-mcp daemon start ~/my-notes   # 백그라운드 시작
+wiki-search-mcp daemon start ~/my-notes --foreground   # 디버깅용
+wiki-search-mcp daemon status ~/my-notes  # 상태 JSON
+wiki-search-mcp daemon logs ~/my-notes -f # 로그 tail
+wiki-search-mcp daemon stop ~/my-notes    # SIGTERM → 10초 후 SIGKILL
+wiki-search-mcp daemon rollback ~/my-notes --last 5  # 최근 5개 적용 되돌리기
+```
+
+주요 옵션 (start):
+- ``--confidence-threshold 0.7`` 자동 적용 임계값
+- ``--rate-per-minute 5 --rate-per-hour 100 --rate-per-day 500`` rate-limit
+- ``--concurrency 2`` 동시 worker 수
+- ``--llm-model haiku`` Claude 모델 alias
+- ``--no-auto-move`` 카테고리 폴더 이동 비활성
 
 ## Configuration
 
@@ -238,7 +286,7 @@ wiki-search-mcp serve ~/my-notes --log-level DEBUG
 
 | 문서 | 설명 |
 |------|------|
-| [API Reference](docs/API.md) | MCP 도구 상세 사용법 (15개) |
+| [API Reference](docs/API.md) | MCP 도구 상세 사용법 (16개) |
 | [Performance Tuning](docs/PERFORMANCE.md) | 대규모 노트 최적화 |
 | [Writing Guide](docs/WRITING.md) | Frontmatter, State, Confidence |
 | [Installation Guide](docs/INSTALLATION.md) | 시나리오별 상세 설치 |
