@@ -311,5 +311,17 @@ def serve(
     server_main(options)
 
 
+# =============================================================================
+# daemon (백그라운드 자동 분류)
+#
+# 순환 import를 피하기 위해 의도적으로 모듈 하단에서 등록한다.
+# pylint: disable=wrong-import-position
+# =============================================================================
+
+from wiki_search_mcp.adapters.cli.daemon_cli import daemon as _daemon_group  # noqa: E402
+
+main.add_command(_daemon_group)
+
+
 if __name__ == "__main__":
     main()
