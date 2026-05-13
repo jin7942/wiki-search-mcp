@@ -3,6 +3,19 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.2] - 2026-05-13
+
+### Fixed
+
+- **CLI 진입 시 torch/sentence_transformers 강제 로딩 제거 (hotfix)**: ``wiki-search-mcp --version``, ``--help``, ``daemon status`` 같은 가벼운 명령이 시작될 때 ``infrastructure/__init__.py``가 ``WikiIndexer``를 즉시 import하면서 ``sentence_transformers → transformers → torch`` 체인 전체를 로드하던 문제. 사용자 환경(Python 3.14 + pipx)에서 진입이 수십 초 걸리거나 Ctrl+C로 중단되는 사례 보고됨.
+- 해결: ``infrastructure/__init__.py``를 PEP 562 ``__getattr__`` lazy 패턴으로 변환. ``WikiIndexer`` / ``WikiWatcher`` 호환성은 유지하되 실제 attribute 접근 시점에만 로드. ``--version`` 응답이 ~10초 → **0.1초**.
+
+### Tests
+
+- ``tests/unit/adapters/test_cli_lazy_import.py``: subprocess 격리 검증으로 ``torch`` / ``sentence_transformers`` / ``transformers`` / ``lancedb`` / ``wiki_search_mcp.infrastructure.indexing.indexer`` 가 CLI 진입 시점에 로드되지 않음을 보장.
+
+---
+
 ## [0.2.1] - 2026-05-13
 
 ### Changed
