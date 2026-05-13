@@ -141,3 +141,52 @@ class EmbeddingError(TechnicalException):
                 details={"model_name": model_name, "reason": reason},
             ),
         )
+
+
+# =============================================================================
+# v0.2.0: Daemon / Classifier 관련 예외
+# =============================================================================
+
+
+class ClassifierError(TechnicalException):
+    """LLM 분류 호출 실패.
+
+    code 예시:
+    - "CLI_NOT_FOUND": claude CLI 미설치/미로그인
+    - "SDK_ERROR": Claude Agent SDK 호출 자체 실패
+    - "INVALID_JSON": LLM 응답이 유효한 JSON이 아님
+    - "INVALID_FIELDS": JSON은 파싱됐으나 필드 검증 실패
+    - "TIMEOUT": 호출 시간 초과
+    """
+
+    @classmethod
+    def of(cls, message: str, code: str, details: dict[str, Any] | None = None) -> ClassifierError:
+        return cls(message, ErrorContext(code=code, details=details))
+
+
+class DaemonError(TechnicalException):
+    """Daemon 라이프사이클 오류.
+
+    code 예시:
+    - "ALREADY_RUNNING": 이미 다른 daemon이 실행 중
+    - "NOT_RUNNING": daemon이 실행 중이 아님
+    - "PIDFILE_ERROR": PID 파일 read/write 실패
+    """
+
+    @classmethod
+    def of(cls, message: str, code: str, details: dict[str, Any] | None = None) -> DaemonError:
+        return cls(message, ErrorContext(code=code, details=details))
+
+
+class RateLimitError(BusinessException):
+    """Rate limit window 초과.
+
+    daemon은 이를 잡아 pending.jsonl에 reason=rate_limited로 기록한다.
+    """
+
+    @classmethod
+    def of(cls, wait_seconds: float) -> RateLimitError:
+        return cls(
+            f"Rate limit hit; would need to wait {wait_seconds:.1f}s",
+            ErrorContext(code="RATE_LIMIT", details={"wait_seconds": wait_seconds}),
+        )

@@ -503,3 +503,76 @@ class ClassificationSuggestion:
             "similar_paths": list(self.similar_paths),
             "reasoning": self.reasoning,
         }
+
+
+# =============================================================================
+# v0.2.0: Daemon 자동 분류 모델
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class ClassificationDecision:
+    """LLM이 산출한 분류 결정.
+
+    Attributes:
+        path: 대상 파일 상대 경로
+        category: 결정된 카테고리
+        tags: 결정된 태그 (최대 5개 권장)
+        confidence: 0.0-1.0. ``daemon.confidence_threshold`` 이상이면 자동 적용
+        reasoning: LLM의 설명 (디버깅/로그용, 250자 내외 권장)
+        provider: 호출한 provider 식별자 (예: ``"claude-code:haiku"``)
+        raw_response: LLM 원본 응답 텍스트 (디버깅용, 200자 truncate)
+    """
+
+    path: str
+    category: str
+    tags: tuple[str, ...]
+    confidence: float
+    reasoning: str
+    provider: str
+    raw_response: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "category": self.category,
+            "tags": list(self.tags),
+            "confidence": self.confidence,
+            "reasoning": self.reasoning,
+            "provider": self.provider,
+            "raw_response": self.raw_response,
+        }
+
+
+@dataclass(frozen=True)
+class AppliedRecord:
+    """daemon이 적용한 자동 분류의 audit/rollback 레코드.
+
+    Attributes:
+        path_before: 적용 전 wiki 상대 경로
+        path_after: 적용 후 (카테고리 폴더 이동 발생 시 다름)
+        frontmatter_before: 적용 전 frontmatter dict (없으면 ``{}``)
+        frontmatter_after: 적용 후 frontmatter dict
+        decision: ClassificationDecision.to_dict() 결과
+        applied_at: ISO 8601 UTC 타임스탬프
+        sha256_before: 적용 전 본문 전체의 SHA-256 (충돌 감지/검증용)
+    """
+
+    path_before: str
+    path_after: str
+    frontmatter_before: dict[str, Any]
+    frontmatter_after: dict[str, Any]
+    decision: dict[str, Any]
+    applied_at: str
+    sha256_before: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path_before": self.path_before,
+            "path_after": self.path_after,
+            "frontmatter_before": dict(self.frontmatter_before),
+            "frontmatter_after": dict(self.frontmatter_after),
+            "decision": dict(self.decision),
+            "applied_at": self.applied_at,
+            "sha256_before": self.sha256_before,
+        }

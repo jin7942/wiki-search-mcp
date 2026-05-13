@@ -70,6 +70,34 @@ def parse_frontmatter(content: str) -> tuple[FrontmatterDict, str]:
     return cast(FrontmatterDict, {}), content
 
 
+def render_frontmatter(meta: FrontmatterDict, body: str) -> str:
+    """frontmatter dict + 본문을 단일 Markdown 문자열로 직렬화.
+
+    parse_frontmatter()의 짝. meta가 비어있으면 본문만 반환합니다.
+    YAML 직렬화 옵션:
+    - sort_keys=False: 입력 순서 유지 (사용자 입력 보존)
+    - allow_unicode=True: 한글/CJK 그대로 유지
+    - default_flow_style=False: 블록 스타일 (사람이 읽기 좋음)
+
+    Args:
+        meta: frontmatter 키-값 dict
+        body: Markdown 본문
+
+    Returns:
+        ``---\n<yaml>---\n<body>\n`` 형식 문자열. meta가 비면 body + 개행만.
+    """
+    body_stripped = body.rstrip("\n")
+    if not meta:
+        return body_stripped + "\n"
+    yaml_text = yaml.safe_dump(
+        dict(meta),
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+    return f"---\n{yaml_text}---\n\n{body_stripped}\n"
+
+
 def normalize_document_path(path: str) -> tuple[str, str]:
     """문서 경로를 정규화.
 
