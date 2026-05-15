@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import threading
 from pathlib import Path
@@ -74,3 +75,45 @@ def test_rotate(tmp_path: Path) -> None:
 def test_rotate_when_missing(tmp_path: Path) -> None:
     log = JsonlLog(tmp_path / "missing.jsonl")
     assert log.rotate("2026-05-13") is None
+
+
+def test_append_serializes_date_and_datetime(tmp_path: Path) -> None:
+    """frontmatter YAML이 ``created: 2026-04-23`` 같은 따옴표 없는 ISO 스칼라를
+    ``datetime.date``로 파싱한다. AppliedRecord.frontmatter_before에 그게
+    그대로 들어오면 표준 ``json.dumps``가 TypeError로 죽으면서 worker
+    전체가 멈추는 회귀가 v0.2.0에서 발생했다 — default 핸들러로 ISO 문자열
+    변환되는지 회귀 보장.
+    """
+    log = JsonlLog(tmp_path / "applied.jsonl")
+    log.append(
+        {
+            "path": "infra/vim-manual.md",
+            "frontmatter_before": {
+                "created": _dt.date(2026, 4, 23),
+                "updated": _dt.datetime(2026, 5, 13, 23, 4, 4),
+            },
+        }
+    )
+    items = list(log.scan())
+    assert len(items) == 1
+    fm = items[0]["frontmatter_before"]
+    assert fm["created"] == "2026-04-23"
+    assert fm["updated"].startswith("2026-05-13T23:04:04")
+
+
+def test_append_serializes_path_and_set(tmp_path: Path) -> None:
+    log = JsonlLog(tmp_path / "items.jsonl")
+    log.append({"p": Path("/tmp/x"), "tags": {"a", "b"}})
+    items = list(log.scan())
+    assert items[0]["p"] == "/tmp/x"
+    assert items[0]["tags"] == ["a", "b"]
+
+
+def test_append_raises_on_unsupported_type(tmp_path: Path) -> None:
+    log = JsonlLog(tmp_path / "items.jsonl")
+
+    class Unknown:
+        pass
+
+    with pytest.raises(TypeError):
+        log.append({"x": Unknown()})

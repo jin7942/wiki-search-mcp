@@ -3,6 +3,30 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.3] - 2026-05-15
+
+### Fixed
+
+- **Daemon worker가 ``datetime.date`` JSON 직렬화 실패로 적용 기록을 못 남기던 버그 (치명)**: PyYAML이 frontmatter의 ``created: 2026-04-23`` 같은 따옴표 없는 ISO 스칼라를 ``datetime.date`` 객체로 자동 파싱하는데, 이 객체가 ``AppliedRecord.frontmatter_before`` 경유로 ``applied.jsonl``에 들어갈 때 표준 ``json.dumps``가 ``TypeError: Object of type date is not JSON serializable`` 으로 죽었다. 이로 인해 frontmatter 적용은 디스크에 반영되어도 ``applied_count`` 가 0으로 유지되고 후속 ``_indexer.reindex()`` 호출이 한 번도 일어나지 않아 ``total_pages: 0``이 영구히 지속되는 연쇄 장애 발생.
+- 해결: ``infrastructure/jsonl/log.py``의 ``json.dumps``에 ``default=_json_default`` 폴백 핸들러 추가. ``datetime.date`` / ``datetime`` / ``time`` → ISO 8601 문자열, ``Path`` → str, ``set`` → 정렬 리스트로 변환.
+
+- **rate_limited path가 watcher 재진입마다 ``pending.jsonl``에 무한 적재되던 문제**: 한 번 rate limit에 걸린 path가 ``find_pending()`` 재스캔에서 계속 다시 큐에 들어가면서 1,830줄까지 부풀어오르는 사례 보고됨.
+- 해결: ``DaemonRunner._cooldown`` 메모리 캐시 추가. ``rate_limited`` / ``classifier_error`` 발생 path는 10분 cooldown 동안 ``_rescan()``에서 큐 재투입을 스킵.
+
+- **``pending_count(status)`` 카운터가 ``rate_limited`` 적재에 누락되던 동기화 버그**: ``pending.jsonl``에는 라인이 쌓이는데 ``daemon_status.json``의 ``pending_count``는 0으로 유지되어 사용자가 적체 상태를 인지하지 못함.
+- 해결: ``RateLimitError`` 핸들러도 ``pending_count`` 카운터를 증가시키도록 보정.
+
+### Changed
+
+- **MCP ``instructions``에 "새 메모는 반드시 ``inbox/``에 작성" 규칙 명시**: Claude가 새 메모를 카테고리 폴더(예: ``infra/``, ``devops/``)에 직접 작성하면서 daemon 자동 분류 경로를 우회하는 사용자 보고. instructions에 강제 규칙 + 이유 + 예외 케이스를 추가해 모든 새 메모가 ``inbox/`` 게이트를 통과하도록 강제.
+
+### Tests
+
+- ``test_jsonl_log.py``: ``datetime.date`` / ``datetime`` / ``Path`` / ``set`` 직렬화 회귀 테스트 3개 추가.
+- ``test_instructions.py``: ``inbox`` 강제 규칙 명시 회귀 테스트 1개 추가.
+
+---
+
 ## [0.2.2] - 2026-05-13
 
 ### Fixed

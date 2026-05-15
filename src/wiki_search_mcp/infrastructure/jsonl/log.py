@@ -6,12 +6,31 @@ Daemon이 ``pending.jsonl`` / ``applied.jsonl`` 같이 멱등 append와 순회/�
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+
+def _json_default(o: Any) -> Any:
+    """``json.dumps`` 폴백 직렬화기.
+
+    frontmatter YAML이 ISO-8601 스칼라를 ``datetime.date``/``datetime`` 객체로
+    자동 변환하기 때문에, ``AppliedRecord.frontmatter_before`` 같은 dict에
+    날짜 객체가 그대로 섞여 들어올 수 있다. 표준 ``json``은 이를 직렬화하지
+    못해 ``TypeError``를 던지며 worker 전체를 죽인다. ISO 문자열로 강제 변환해
+    적용 기록이 누락되는 것을 막는다.
+    """
+    if isinstance(o, (_dt.datetime, _dt.date, _dt.time)):
+        return o.isoformat()
+    if isinstance(o, Path):
+        return str(o)
+    if isinstance(o, set):
+        return sorted(o)
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
 class JsonlLog:
@@ -40,7 +59,7 @@ class JsonlLog:
 
         ``ensure_ascii=False``: 한글/CJK 문자를 그대로 저장.
         """
-        line = json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n"
+        line = json.dumps(obj, ensure_ascii=False, default=_json_default).encode("utf-8") + b"\n"
         with self._lock, open(self._path, "ab") as fp:
             fp.write(line)
             fp.flush()

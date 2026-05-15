@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,6 +62,10 @@ class DaemonRunner:
         self._stop = asyncio.Event()
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=opts.queue_max)
         self._inflight: set[str] = set()
+        # path → cooldown 만료 monotonic time. rate_limited / classifier_error 후
+        # 같은 path가 재스캔 때마다 무한 재투입되어 pending.jsonl이 폭증하는 것을 방지.
+        self._cooldown: dict[str, float] = {}
+        self._cooldown_seconds: float = 600.0
 
         self._container = ServiceContainer(
             str(opts.wiki_path),
@@ -190,9 +195,16 @@ class DaemonRunner:
         except Exception:
             logger.exception("find_pending() failed")
             return
+        now = time.monotonic()
+        # 만료된 cooldown 정리
+        expired = [p for p, t in self._cooldown.items() if t <= now]
+        for p in expired:
+            self._cooldown.pop(p, None)
         for item in items:
             rel = item.path
             if rel in self._inflight:
+                continue
+            if rel in self._cooldown:
                 continue
             try:
                 self._queue.put_nowait(rel)
@@ -223,7 +235,8 @@ class DaemonRunner:
                         "recorded_at": _utc_now(),
                     }
                 )
-                self._status.increment("error_count")
+                self._cooldown[rel] = time.monotonic() + self._cooldown_seconds
+                self._status.increment("pending_count", last_classified_at=_utc_now())
             except ClassifierError as e:
                 self._pending.append(
                     {
@@ -234,6 +247,7 @@ class DaemonRunner:
                         "recorded_at": _utc_now(),
                     }
                 )
+                self._cooldown[rel] = time.monotonic() + self._cooldown_seconds
                 self._status.increment("error_count")
             except asyncio.CancelledError:
                 raise

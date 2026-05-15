@@ -49,3 +49,16 @@ def test_fastmcp_accepts_instructions():
 
     server = FastMCP("test", instructions=WIKI_INSTRUCTIONS)
     assert server is not None
+
+
+def test_instructions_mandates_inbox_for_new_notes():
+    """새 메모는 반드시 inbox/에 작성하도록 명시되어야 한다.
+
+    v0.2.0 사용자 보고: Claude가 새 메모를 카테고리 폴더(예: ``infra/``)에
+    직접 작성하면서 daemon 자동 분류 경로(``inbox`` → LLM 분류 → 이동)를
+    우회하는 문제 발생. instructions에 강제 규칙이 명시되어야 한다.
+    """
+    text = WIKI_INSTRUCTIONS
+    assert "inbox" in text
+    # "반드시" 같은 강제 표현 또는 명시적 영문 강제어 중 하나는 포함되어야 함
+    assert any(kw in text for kw in ("반드시", "언제나", "MUST", "must"))
