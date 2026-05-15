@@ -36,9 +36,15 @@ def setup_logging(
         force=True,  # 기존 설정 덮어쓰기
     )
 
-    # wiki_search_mcp 네임스페이스 로거 레벨 설정
+    # wiki_search_mcp 네임스페이스 로거 레벨 설정.
+    # 핸들러는 root에만 두고 pkg_logger는 propagate로 전달받게 한다.
+    # 과거에 ``setLevel``과 함께 추가 핸들러가 누적되어 같은 메시지가
+    # 두 번 출력되는 회귀가 있었으므로, pkg_logger의 핸들러는 명시적으로 비우고
+    # propagate=True를 보장한다.
     pkg_logger = logging.getLogger("wiki_search_mcp")
     pkg_logger.setLevel(level_value)
+    pkg_logger.handlers = []
+    pkg_logger.propagate = True
 
 
 def get_logger(name: str) -> logging.Logger:

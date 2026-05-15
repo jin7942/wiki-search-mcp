@@ -353,11 +353,14 @@ class WikiIndexer:
         for deleted_path in deleted_paths:
             del meta["files"][deleted_path]
 
-        # LanceDB 테이블 생성/갱신
+        # LanceDB 테이블 생성/갱신.
+        # ``drop_table`` + ``create_table``을 분리하면 다중 worker daemon에서
+        # race가 발생한다 (worker A가 drop한 직후 worker B가 list_tables를 보고
+        # 다시 create를 시도하다 ``Table 'wiki' already exists`` 충돌).
+        # lancedb가 제공하는 ``mode="overwrite"`` 단일 호출은 내부적으로 atomic하므로
+        # 명시적인 drop이 불필요하다.
         if records:
-            if "wiki" in self.db.list_tables():
-                self.db.drop_table("wiki")
-            self.db.create_table("wiki", records)
+            self.db.create_table("wiki", records, mode="overwrite")
 
         # 그래프 저장
         graph_path.write_text(

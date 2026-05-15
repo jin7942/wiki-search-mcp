@@ -3,6 +3,29 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.4] - 2026-05-15
+
+### Fixed
+
+- **다중 worker daemon에서 post-apply reindex가 LanceDB race로 100% 실패하던 버그 (치명)**: v0.2.3에서 분류/frontmatter 적용이 정상화되자 다음 단계인 ``indexer.reindex(full=False)`` 가 노출됐다. 두 worker가 동시에 ``list_tables`` → ``drop_table`` → ``create_table`` 흐름을 실행하면서 lancedb 0.30.2의 매니페스트 commit conflict (``Retryable commit conflict ... Overwrite transaction was preempted by concurrent transaction`` / ``Table 'wiki' already exists``)로 항상 한쪽이 실패. 결과: 분류는 디스크에 반영되지만 검색 인덱스는 첫 부트스트랩 시점에 고정되어 신규 문서가 ``wiki_search``로 영영 검색되지 않는 silent 장애.
+- 해결 ①: ``WikiIndexer.reindex``의 ``drop_table`` + ``create_table`` 두 단계를 ``create_table(..., mode="overwrite")`` 단일 atomic 호출로 통합.
+- 해결 ②: ``DaemonRunner._reindex_lock`` (``asyncio.Lock``) 추가. lancedb 0.30.2가 동시 ``overwrite`` 호출 자체를 보호하지 못하는 것으로 격리 검증됨 — daemon 측 직렬화가 필수. ``asyncio.to_thread``로 blocking reindex를 thread executor에 위임해 다른 worker 분류는 계속 병렬 진행.
+
+- **``post-apply reindex failed`` 가 ``error_count``에 잡히지 않아 운영자가 인덱스 갱신 누락을 인지하지 못하던 가시성 결함**: 분류 자체는 성공이라 분류 error와 묶을 수 없음.
+- 해결: ``daemon_status.json``에 ``reindex_error_count`` 별도 카운터 신설.
+
+- **로그 메시지가 두 번씩 출력되던 cosmetic 회귀**: ``setup_logging``이 root에 핸들러를 두면서 ``wiki_search_mcp`` 네임스페이스 로거에도 핸들러가 누적되어 propagate 경로로 메시지가 중복 출력. ``pkg_logger.handlers = []`` + ``propagate=True``로 정리.
+
+### Tests
+
+- ``tests/unit/infrastructure/test_daemon_reindex.py`` 신설 (3건):
+  - 2-worker 동시 ``_classify_and_apply`` 시 reindex 동시 실행 peak가 1을 넘지 않음
+  - reindex 실패가 ``reindex_error_count``만 증가시키고 ``error_count``/``applied_count``는 분류 성공대로 처리됨
+  - 소스 가드: ``drop_table("wiki")`` 호출이 indexer에서 사라지고 ``mode="overwrite"``가 명시되어 있음
+- 격리 실물 검증: lancedb 0.30.2 동시 ``create_table(mode="overwrite")`` 5회 × 2-thread → unprotected는 5건 실패, ``threading.Lock``으로 직렬화하면 0건. 즉 daemon ``_reindex_lock``이 race를 실제로 차단함을 lancedb 실물로 확인.
+
+---
+
 ## [0.2.3] - 2026-05-15
 
 ### Fixed

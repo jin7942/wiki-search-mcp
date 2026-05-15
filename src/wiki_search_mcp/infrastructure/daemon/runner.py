@@ -66,6 +66,10 @@ class DaemonRunner:
         # 같은 path가 재스캔 때마다 무한 재투입되어 pending.jsonl이 폭증하는 것을 방지.
         self._cooldown: dict[str, float] = {}
         self._cooldown_seconds: float = 600.0
+        # LanceDB의 ``create_table(mode="overwrite")``는 atomic이지만, 같은 시점에
+        # 두 worker가 동시에 호출하면 매니페스트 버전 경쟁으로 한쪽이 실패할 수 있다.
+        # post-apply reindex만 직렬화해 worker 동시성은 유지하면서 인덱스 갱신만 순차.
+        self._reindex_lock: asyncio.Lock | None = None
 
         self._container = ServiceContainer(
             str(opts.wiki_path),
@@ -113,6 +117,8 @@ class DaemonRunner:
     # ------------------------------------------------------------------ main
     async def _main(self) -> None:
         self._loop = asyncio.get_running_loop()
+        # asyncio.Lock은 running loop가 있어야 안전하게 만들 수 있어 여기서 늦게 생성.
+        self._reindex_lock = asyncio.Lock()
 
         # Provider healthcheck — 실패 시 즉시 종료
         try:
@@ -140,6 +146,7 @@ class DaemonRunner:
                 "applied_count": 0,
                 "pending_count": 0,
                 "error_count": 0,
+                "reindex_error_count": 0,
             }
         )
 
@@ -316,10 +323,19 @@ class DaemonRunner:
 
         self._applied.append(record.to_dict())
         try:
-            self._indexer.reindex(full=False)
+            # 다중 worker 동시 reindex로 인한 LanceDB 매니페스트 race 방지.
+            # 분류 INFO 적용 자체는 worker별로 병렬이지만, 인덱스 갱신은 순차.
+            if self._reindex_lock is not None:
+                async with self._reindex_lock:
+                    await asyncio.to_thread(self._indexer.reindex, full=False)
+            else:
+                await asyncio.to_thread(self._indexer.reindex, full=False)
             self._container.invalidate_all()
         except Exception:
             logger.exception("post-apply reindex failed (continuing)")
+            # 분류 자체는 성공이므로 error_count는 그대로 두되,
+            # 운영자가 인덱스 갱신 누락을 감지할 수 있도록 별도 카운터로 노출.
+            self._status.increment("reindex_error_count")
         self._status.increment("applied_count", last_classified_at=_utc_now())
 
 
