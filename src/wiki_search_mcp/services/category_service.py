@@ -16,7 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from wiki_search_mcp.core.config import CATEGORY_FOLDER_THRESHOLD, LISTING_TTL_SECONDS
+from wiki_search_mcp.core.config import (
+    CATEGORY_FOLDER_THRESHOLD,
+    LISTING_TTL_SECONDS,
+    is_staging_folder,
+)
 from wiki_search_mcp.core.models import CategoryListing
 from wiki_search_mcp.services.tagger_service import AutoTagger
 
@@ -102,20 +106,35 @@ class CategoryService:
             return CategoryListing.of(mode="empty", categories=[], detected_at=detected_at)
 
         directories: list[str] = []
+        staging: list[str] = []
         for entry in entries:
             if not entry.is_dir():
                 continue
             if self._ignore_matcher.should_ignore(entry):
                 continue
+            if is_staging_folder(entry.name):
+                staging.append(entry.name)
+                continue
             directories.append(entry.name)
 
         directories.sort()
+        staging.sort()
 
+        # mode는 staging을 제외한 일반 카테고리 수만으로 판정.
+        # staging만 있는 경우는 "사용 가능한 카테고리 없음" 으로 본다.
         if len(directories) >= CATEGORY_FOLDER_THRESHOLD:
             return CategoryListing.of(
-                mode="folder", categories=directories, detected_at=detected_at
+                mode="folder",
+                categories=directories,
+                detected_at=detected_at,
+                staging_folders=staging,
             )
-        return CategoryListing.of(mode="empty", categories=[], detected_at=detected_at)
+        return CategoryListing.of(
+            mode="empty",
+            categories=[],
+            detected_at=detected_at,
+            staging_folders=staging,
+        )
 
     def suggest_categories(self, top_k: int = 10) -> list[dict]:
         """기존 인덱스를 분석하여 카테고리 후보 제시.

@@ -214,3 +214,64 @@ def test_returns_category_listing_type(wiki_path: Path, matcher: IgnoreMatcher):
     svc = CategoryService(wiki_path, matcher)
     listing = svc.list_categories()
     assert isinstance(listing, CategoryListing)
+
+
+# =============================================================================
+# v0.2.5: inbox staging 폴더 격리
+# =============================================================================
+
+
+def test_inbox_variants_excluded_from_categories(wiki_path: Path, matcher: IgnoreMatcher):
+    """inbox 변형(대소문자/_ . 0. prefix)은 카테고리에서 제외되고 staging_folders로 분리."""
+    _make_dirs(
+        wiki_path,
+        ["inbox", "Inbox", "INBOX", "0.Inbox", "_inbox", "infra", "devops"],
+    )
+
+    svc = CategoryService(wiki_path, matcher)
+    listing = svc.list_categories()
+
+    assert listing.mode == "folder"
+    assert listing.categories == ("devops", "infra")
+    # staging 5종 모두 staging_folders에 포함 (정렬됨)
+    assert set(listing.staging_folders) == {"0.Inbox", "INBOX", "Inbox", "_inbox", "inbox"}
+    # 카테고리 쪽에는 inbox 변형이 절대 등장하지 않음
+    for staging_name in listing.staging_folders:
+        assert staging_name not in listing.categories
+
+
+def test_only_inbox_returns_empty_mode(wiki_path: Path, matcher: IgnoreMatcher):
+    """inbox만 있으면 일반 카테고리가 0개 → empty mode."""
+    _make_dirs(wiki_path, ["inbox"])
+
+    svc = CategoryService(wiki_path, matcher)
+    listing = svc.list_categories()
+
+    assert listing.mode == "empty"
+    assert listing.categories == ()
+    assert listing.staging_folders == ("inbox",)
+
+
+def test_inbox_lookalike_not_excluded(wiki_path: Path, matcher: IgnoreMatcher):
+    """inbox-archive / my-inbox 같이 본체가 inbox로 끝나지 않는 폴더는 일반 카테고리로 유지."""
+    _make_dirs(wiki_path, ["inbox-archive", "my-inbox", "inboxing"])
+
+    svc = CategoryService(wiki_path, matcher)
+    listing = svc.list_categories()
+
+    assert listing.mode == "folder"
+    assert listing.categories == ("inbox-archive", "inboxing", "my-inbox")
+    assert listing.staging_folders == ()
+
+
+def test_to_dict_exposes_staging_folders(wiki_path: Path, matcher: IgnoreMatcher):
+    """wiki_get_categories MCP 응답에 staging_folders 필드가 노출되어야 한다."""
+    _make_dirs(wiki_path, ["inbox", "infra", "devops"])
+
+    svc = CategoryService(wiki_path, matcher)
+    payload = svc.list_categories().to_dict()
+
+    assert "staging_folders" in payload
+    assert payload["staging_folders"] == ["inbox"]
+    assert payload["categories"] == ["devops", "infra"]
+    assert "inbox" not in payload["categories"]

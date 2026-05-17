@@ -407,20 +407,33 @@ class CategoryListing:
 
     Attributes:
         mode: 'folder'는 디렉토리 자동 감지, 'empty'는 카테고리 없음 (AI 폴백 신호)
-        categories: 감지된 카테고리 이름 (정렬됨)
+        categories: 감지된 카테고리 이름 (정렬됨). staging 폴더는 제외됨.
         detected_at: ISO 8601 감지 시각
+        staging_folders: inbox 변형 폴더(``is_staging_folder`` 매치) 이름. 정렬됨.
+            카테고리가 아니라 자동 분류 대상 영역. Claude에게 "여기 던지면 자동 분류"
+            대상임을 알리는 용도.
     """
 
     mode: CategoryMode
     categories: tuple[str, ...]
     detected_at: str
+    staging_folders: tuple[str, ...] = ()
 
     @classmethod
     def of(
-        cls, mode: CategoryMode, categories: list[str] | tuple[str, ...], detected_at: str
+        cls,
+        mode: CategoryMode,
+        categories: list[str] | tuple[str, ...],
+        detected_at: str,
+        staging_folders: list[str] | tuple[str, ...] | None = None,
     ) -> CategoryListing:
         """팩토리 메서드."""
-        return cls(mode=mode, categories=tuple(categories), detected_at=detected_at)
+        return cls(
+            mode=mode,
+            categories=tuple(categories),
+            detected_at=detected_at,
+            staging_folders=tuple(staging_folders) if staging_folders else (),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """dict로 변환."""
@@ -428,10 +441,11 @@ class CategoryListing:
             "mode": self.mode,
             "categories": list(self.categories),
             "detected_at": self.detected_at,
+            "staging_folders": list(self.staging_folders),
         }
 
 
-PendingReason = Literal["no_frontmatter", "no_category", "not_indexed"]
+PendingReason = Literal["no_frontmatter", "no_category", "not_indexed", "in_staging"]
 
 
 @dataclass(frozen=True)

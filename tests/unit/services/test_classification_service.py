@@ -319,3 +319,60 @@ def test_to_dict_serialization(wiki_path: Path, matcher: IgnoreMatcher):
     assert "tag_candidates" in d
     assert "similar_paths" in d
     assert "reasoning" in d
+
+
+# =============================================================================
+# v0.2.5: inbox staging 폴더의 .md는 frontmatter 상태와 무관하게 항상 pending
+# =============================================================================
+
+
+def test_pending_includes_staging_files_with_category(wiki_path: Path, matcher: IgnoreMatcher):
+    """inbox/foo.md가 인덱스에 category='infra'로 들어가 있어도 pending에 잡혀야 한다.
+
+    이게 없으면 daemon이 inbox에 떨어진 파일을 다시 분류·이동하지 못해
+    파일이 staging에 영원히 머무는 silent stuck이 발생.
+    """
+    indexed = [
+        {"path": "inbox/foo.md", "category": "infra", "tags": ["x"], "title": "F"},
+        {"path": "infra/normal.md", "category": "infra", "tags": ["y"], "title": "N"},
+    ]
+    svc = _make_classification_service(wiki_path, matcher, indexed_docs=indexed)
+    pending = svc.find_pending()
+
+    by_path = {p.path: p for p in pending}
+    assert "inbox/foo.md" in by_path
+    assert by_path["inbox/foo.md"].reason == "in_staging"
+    # 일반 카테고리 폴더의 파일은 분류 완료로 간주
+    assert "infra/normal.md" not in by_path
+
+
+def test_pending_includes_staging_variant_folders(wiki_path: Path, matcher: IgnoreMatcher):
+    """inbox 변형 폴더(0.Inbox, _inbox 등)도 동일하게 in_staging으로 잡혀야 한다."""
+    indexed = [
+        {"path": "0.Inbox/a.md", "category": "devops", "tags": [], "title": "A"},
+        {"path": "_inbox/b.md", "category": "infra", "tags": ["t"], "title": "B"},
+        {"path": "Inbox/c.md", "category": "", "tags": [], "title": "C"},
+    ]
+    svc = _make_classification_service(wiki_path, matcher, indexed_docs=indexed)
+    pending = svc.find_pending()
+
+    by_path = {p.path: p for p in pending}
+    assert by_path["0.Inbox/a.md"].reason == "in_staging"
+    assert by_path["_inbox/b.md"].reason == "in_staging"
+    assert by_path["Inbox/c.md"].reason == "in_staging"
+
+
+def test_pending_includes_staging_disk_files(wiki_path: Path, matcher: IgnoreMatcher):
+    """인덱스에 없고 디스크에만 있는 inbox/*.md도 in_staging으로 노출."""
+    (wiki_path / "inbox").mkdir()
+    (wiki_path / "inbox" / "new.md").write_text("# new", encoding="utf-8")
+    (wiki_path / "infra").mkdir()
+    (wiki_path / "infra" / "fresh.md").write_text("# fresh", encoding="utf-8")
+
+    # 인덱스에는 아무것도 없음 → 디스크 차집합 루프가 작동
+    svc = _make_classification_service(wiki_path, matcher, indexed_docs=[])
+    pending = svc.find_pending()
+
+    by_path = {p.path: p for p in pending}
+    assert by_path["inbox/new.md"].reason == "in_staging"
+    assert by_path["infra/fresh.md"].reason == "not_indexed"

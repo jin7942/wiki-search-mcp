@@ -3,6 +3,31 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.5] - 2026-05-17
+
+### Fixed
+
+- **inbox 폴더가 카테고리 후보로 잡혀 staging 파일이 영원히 머물던 silent stuck**: v0.2.3에서 MCP instructions에 "새 메모는 반드시 ``inbox/``에 작성" 규칙을 박았지만 런타임 코드는 ``inbox/``를 1depth 디렉토리로 보고 카테고리 목록에 포함시켰다. 그 결과 ``CategoryService.detect_from_folders()``가 ``inbox``를 ``active_categories``로 전달 → LLM이 모호한 문서를 ``category="inbox"``로 응답 가능 → ``FrontmatterWriter._decide_target_path``가 ``parts[0] == category == "inbox"``로 판정해 파일 이동 안 함 → 게다가 ``find_pending``이 ``category="inbox"``를 정상 분류로 인정해 daemon이 재분류하지 않는 silent stuck. inbox 폴더의 파일이 영원히 staging에 머무는 사용자 보고를 코드 흐름에서 정확히 재현.
+- 해결 ①: ``core/config.py``에 ``STAGING_FOLDER_PATTERN``과 ``is_staging_folder(name)`` 헬퍼 신설. 정규식 ``^[._]*(?:\d+\.?)?inbox$`` (대소문자 무시)로 ``inbox`` / ``Inbox`` / ``INBOX`` / ``_inbox`` / ``.inbox`` / ``0.Inbox`` / ``00.inbox`` 등 정렬용 prefix 변형까지 매치. ``inbox-archive`` / ``my-inbox`` / ``inboxing`` 같은 본체가 inbox 단어로 끝나지 않는 폴더는 일반 카테고리로 유지(오탐 회피).
+- 해결 ②: ``CategoryService.detect_from_folders()``에서 staging 폴더를 ``categories``에서 제외하고 새로운 ``CategoryListing.staging_folders`` 필드로 별도 노출. ``mode`` 판정은 staging을 제외한 일반 카테고리 수만 본다 (staging만 있으면 ``empty``).
+- 해결 ③: ``ClassificationService.find_pending()``의 인덱스/디스크 루프 양쪽에 staging 분기 추가. inbox 폴더 안의 .md 파일은 frontmatter 상태(``category`` 박혀 있어도)와 무관하게 항상 ``reason="in_staging"``으로 pending에 노출. daemon이 다시 큐잉해 적절한 카테고리 폴더로 이동.
+
+### Changed
+
+- ``CategoryListing.to_dict()``에 ``staging_folders`` 필드 추가. ``wiki_get_categories`` MCP 응답에 자동 노출.
+- ``PendingReason`` Literal에 ``"in_staging"`` 추가. ``find_pending`` 정렬 순서에서 가장 높은 우선순위.
+- MCP ``instructions.py``에 한 문단 추가: "inbox는 카테고리가 아니라 staging 영역". Claude가 ``staging_folders`` 필드로 확인하도록 안내.
+
+### Tests
+
+- ``tests/unit/test_staging_folder.py`` 신설 (헬퍼 단위 18건 — 매치/비매치 parametrize).
+- ``tests/unit/services/test_category_service.py``: staging 격리 회귀 4건 추가 (변형 폴더 제외 / inbox만 있을 때 empty / lookalike 오탐 없음 / to_dict 노출).
+- ``tests/unit/services/test_classification_service.py``: staging 강제 pending 회귀 3건 추가 (인덱스 + category 박힘 / 변형 폴더 / 디스크 신규).
+- ``tests/unit/adapters/test_instructions.py``: instructions가 "inbox는 카테고리 아님"을 명시하는지 회귀 1건 추가.
+- 격리 실물 검증: 사용자 vault 구조(inbox + Inbox + 0.Inbox + infra + devops + inbox-archive) 그대로 재현 → staging 3종 격리, ``inbox-archive``는 일반 카테고리 유지, staging 파일은 category 박혀 있어도 항상 pending 확인.
+
+---
+
 ## [0.2.4] - 2026-05-15
 
 ### Fixed

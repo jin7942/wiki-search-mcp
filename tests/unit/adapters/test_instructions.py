@@ -51,6 +51,17 @@ def test_fastmcp_accepts_instructions():
     assert server is not None
 
 
+def test_instructions_clarifies_inbox_not_a_category():
+    """v0.2.5: inbox는 카테고리가 아니라 staging 영역이라는 점이 명시되어야 한다.
+
+    이전에는 instructions에 "inbox에 작성"만 있고 "inbox는 카테고리 아님"이
+    빠져 있어서 Claude가 inbox를 일반 카테고리로 오해할 수 있었다.
+    """
+    text = WIKI_INSTRUCTIONS
+    assert "staging" in text or "staging_folders" in text
+    assert "카테고리가 아니" in text or "not a category" in text.lower()
+
+
 def test_instructions_mandates_inbox_for_new_notes():
     """새 메모는 반드시 inbox/에 작성하도록 명시되어야 한다.
 

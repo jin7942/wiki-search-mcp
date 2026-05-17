@@ -44,6 +44,14 @@ WIKI_INSTRUCTIONS: str = """\
   지시대로 따르되, frontmatter의 ``category``는 사용자 명시 값을 우선합니다.
 - 기존 파일을 **수정**하는 경우는 그 파일의 현재 위치를 유지합니다(이동 금지).
 
+중요:
+- ``inbox``는 **카테고리가 아니라 staging 영역**입니다. ``wiki_get_categories`` 응답의
+  ``staging_folders`` 배열에서 확인할 수 있으며 ``categories``에는 포함되지 않습니다.
+  따라서 분류기는 ``inbox``를 답으로 고르지 않으며, ``inbox/``에 떨어진 파일은
+  frontmatter에 ``category`` 값이 박혀 있어도 daemon이 다시 분류해 적절한 폴더로
+  이동시킵니다. ``inbox`` 변형(``Inbox``, ``0.Inbox``, ``_inbox`` 등)도 동일하게
+  staging으로 식별됩니다.
+
 ## 첫 사용 / 인덱스 부트스트랩
 
 서버는 기동 시 인덱스가 비어있으면 **백그라운드에서 자동으로 전체 인덱싱**을 시작합니다.

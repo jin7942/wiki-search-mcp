@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 """공통 설정 상수.
 
 여러 모듈에서 공유하는 설정값과 상수를 정의합니다.
@@ -93,6 +95,36 @@ CATEGORY_FOLDER_THRESHOLD: int = 2
 
 LISTING_TTL_SECONDS: float = 60.0
 """CategoryService/ClassificationService 캐시 TTL."""
+
+
+# ============================================================================
+# Staging 폴더 (inbox 변형)
+# ============================================================================
+
+STAGING_FOLDER_PATTERN = re.compile(r"^[._]*(?:\d+\.?)?inbox$", re.IGNORECASE)
+"""inbox 변형 폴더 정규식.
+
+매치: inbox, Inbox, INBOX, _inbox, .inbox, 0.Inbox, 00.inbox, 1inbox
+비매치: inbox-archive, my-inbox, inboxing, inbox_old
+"""
+
+
+def is_staging_folder(name: str) -> bool:
+    """폴더명이 staging(inbox 변형)인지 판정.
+
+    staging 폴더는 카테고리 자동 감지 결과(``CategoryListing.categories``)에서
+    제외되고 ``staging_folders`` 필드로 별도 노출된다. 또한 staging 폴더 안의
+    .md 파일은 frontmatter 상태와 무관하게 항상 pending으로 노출된다.
+
+    Args:
+        name: 디렉토리 이름 (basename)
+
+    Returns:
+        inbox 변형이면 True
+    """
+    if not name:
+        return False
+    return bool(STAGING_FOLDER_PATTERN.match(name))
 
 
 # ============================================================================

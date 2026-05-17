@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from wiki_search_mcp.core.config import LISTING_TTL_SECONDS
+from wiki_search_mcp.core.config import LISTING_TTL_SECONDS, is_staging_folder
 from wiki_search_mcp.core.exceptions import DocumentNotFoundError
 from wiki_search_mcp.core.models import ClassificationSuggestion, PendingItem
 from wiki_search_mcp.core.path_validator import validate_path
@@ -116,6 +116,20 @@ class ClassificationService:
                 if not path or path in seen_paths:
                     continue
 
+                # staging 폴더(inbox 변형) 안의 파일은 frontmatter 상태와 무관하게
+                # 항상 분류 대상. category="infra" 같은 값이 박혀있어도 daemon이
+                # 다시 큐잉해서 적절한 카테고리 폴더로 이동시켜야 한다.
+                first = path.split("/", 1)[0] if "/" in path else ""
+                if first and is_staging_folder(first):
+                    full_path = self._pages_path / path
+                    items.append(
+                        PendingItem.of(
+                            path=path, reason="in_staging", mtime=_format_mtime(full_path)
+                        )
+                    )
+                    seen_paths.add(path)
+                    continue
+
                 category = (doc.get("category") or "").strip()
                 tags = doc.get("tags") or []
 
@@ -145,18 +159,29 @@ class ClassificationService:
                 indexed_paths = set()
 
         for rel_path in disk_files:
-            if rel_path in seen_paths or rel_path in indexed_paths:
+            if rel_path in seen_paths:
+                continue
+            first = rel_path.split("/", 1)[0] if "/" in rel_path else ""
+            is_staging = bool(first) and is_staging_folder(first)
+            # staging 파일은 인덱스 유무와 무관하게 항상 pending으로 노출.
+            # 인덱스에 있어도 daemon이 다시 분류해 카테고리 폴더로 이동시켜야 함.
+            if not is_staging and rel_path in indexed_paths:
                 continue
             full_path = self._pages_path / rel_path
+            reason = "in_staging" if is_staging else "not_indexed"
             items.append(
-                PendingItem.of(
-                    path=rel_path, reason="not_indexed", mtime=_format_mtime(full_path)
-                )
+                PendingItem.of(path=rel_path, reason=reason, mtime=_format_mtime(full_path))
             )
             seen_paths.add(rel_path)
 
-        # 정렬: not_indexed → no_frontmatter → no_category, 같은 reason은 path 사전순
-        reason_order = {"not_indexed": 0, "no_frontmatter": 1, "no_category": 2}
+        # 정렬: in_staging → not_indexed → no_frontmatter → no_category,
+        # 같은 reason은 path 사전순
+        reason_order = {
+            "in_staging": 0,
+            "not_indexed": 1,
+            "no_frontmatter": 2,
+            "no_category": 3,
+        }
         items.sort(key=lambda it: (reason_order.get(it.reason, 9), it.path))
 
         # 캐시 갱신
