@@ -201,6 +201,8 @@ class DaemonRunner:
             items = self._container.classification_service.find_pending(limit=200)
         except Exception:
             logger.exception("find_pending() failed")
+            # silent failure 방지 — daemon_status.json의 error_count로 외부에 노출.
+            self._status.increment("error_count")
             return
         now = time.monotonic()
         # 만료된 cooldown 정리
@@ -217,6 +219,8 @@ class DaemonRunner:
                 self._queue.put_nowait(rel)
             except asyncio.QueueFull:
                 logger.warning("queue full; dropping enqueue for %s", rel)
+                # 큐 적체로 path가 누락되는 것도 silent failure — 외부에 노출.
+                self._status.increment("error_count")
                 break
 
     # ---------------------------------------------------------------- worker

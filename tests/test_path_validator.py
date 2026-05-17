@@ -1,6 +1,8 @@
 """PathValidator 테스트.
 
-Path Traversal 공격 방어 및 경로 정규화를 테스트합니다.
+v0.2.6: 정규식 화이트리스트 제거. Path Traversal 방어는 명시적 블랙리스트
+(``..``, ``/시작``, ``\\x00``, ``\\``, ``%``)와 ``_validate_within_base``의
+resolve+is_relative_to 검증이 담당.
 """
 
 import tempfile
@@ -16,205 +18,173 @@ from wiki_search_mcp.core.path_validator import (
 
 
 class TestPathValidator:
-    """경로 검증 테스트."""
+    """경로 검증 — 기본 화이트리스트."""
 
     def test_valid_simple_path(self):
-        """유효한 단순 경로."""
-        result = validate_path("docs/readme.md")
-        assert result == "docs/readme.md"
+        assert validate_path("docs/readme.md") == "docs/readme.md"
 
     def test_valid_path_without_extension(self):
         """확장자 없는 경로는 .md 추가."""
-        result = validate_path("docs/readme")
-        assert result == "docs/readme.md"
+        assert validate_path("docs/readme") == "docs/readme.md"
 
     def test_valid_korean_path(self):
-        """한글 경로 허용."""
-        result = validate_path("문서/가이드.md")
-        assert result == "문서/가이드.md"
+        assert validate_path("문서/가이드.md") == "문서/가이드.md"
 
     def test_valid_mixed_language_path(self):
-        """혼합 언어 경로 허용."""
-        result = validate_path("docs/설정-guide.md")
-        assert result == "docs/설정-guide.md"
+        assert validate_path("docs/설정-guide.md") == "docs/설정-guide.md"
 
     def test_invalid_empty_path(self):
-        """빈 경로는 에러."""
-        with pytest.raises(InvalidPathError):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("")
+        assert exc.value.context.details["reason"] == "empty"
 
     def test_invalid_whitespace_only_path(self):
-        """공백만 있는 경로는 에러."""
-        with pytest.raises(InvalidPathError):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("   ")
+        assert exc.value.context.details["reason"] == "empty"
 
     def test_invalid_absolute_path(self):
-        """절대 경로는 에러."""
-        with pytest.raises(InvalidPathError):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("/etc/passwd")
+        assert exc.value.context.details["reason"] == "absolute"
 
     def test_invalid_path_traversal_double_dot(self):
-        """.. 포함 경로는 에러."""
-        with pytest.raises(InvalidPathError):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("../etc/passwd")
+        assert exc.value.context.details["reason"] == "parent_traversal"
 
-        with pytest.raises(InvalidPathError):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs/../../../etc/passwd")
-
-    def test_invalid_special_characters(self):
-        """특수문자 포함 경로는 에러."""
-        with pytest.raises(InvalidPathError):
-            validate_path("docs/file;rm -rf.md")
-
-        with pytest.raises(InvalidPathError):
-            validate_path("docs/file|cat /etc/passwd.md")
+        assert exc.value.context.details["reason"] == "parent_traversal"
 
 
 class TestPathValidatorWithBaseDir:
-    """base_dir 포함 경로 검증 테스트."""
+    """base_dir 포함 경로 검증 — resolve 기반 traversal 방어."""
 
     def test_valid_path_within_base(self):
-        """base_dir 내부 경로 허용."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             (base / "docs").mkdir()
             (base / "docs" / "readme.md").touch()
-
             result = validate_path("docs/readme.md", base)
             assert result == "docs/readme.md"
 
     def test_invalid_path_outside_base(self):
-        """base_dir 외부 경로는 에러."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir) / "wiki"
             base.mkdir()
-
-            # 상위 디렉토리로 탈출 시도
-            with pytest.raises(InvalidPathError):
-                validate_path("../outside.md", base)
-
-
-class TestPathValidatorForQuery:
-    """쿼리용 경로 검증 테스트."""
-
-    def test_valid_query_path(self):
-        """유효한 쿼리 경로."""
-        result = validate_path_for_query("docs/readme.md")
-        assert result == "docs/readme.md"
-
-    def test_query_path_no_extension_normalization(self):
-        """쿼리 경로는 확장자 정규화 없음."""
-        result = validate_path_for_query("docs/readme")
-        assert result == "docs/readme"  # .md 추가 안 함
-
-    def test_invalid_query_path_traversal(self):
-        """쿼리 경로에서도 Path Traversal 방어."""
-        with pytest.raises(InvalidPathError):
-            validate_path_for_query("../etc/passwd")
-
-    def test_invalid_query_path_absolute(self):
-        """쿼리 경로에서도 절대 경로 거부."""
-        with pytest.raises(InvalidPathError):
-            validate_path_for_query("/etc/passwd")
+            # raw로 ..가 안 들어가지만 symlink/cross-mount 등에서 resolve가
+            # base 밖으로 빠질 수 있는 시나리오를 시뮬레이션하기 위해
+            # symlink로 외부를 가리키게 한다.
+            outside = Path(tmpdir) / "outside"
+            outside.mkdir()
+            (base / "escape").symlink_to(outside)
+            with pytest.raises(InvalidPathError) as exc:
+                validate_path("escape/secret.md", base)
+            assert exc.value.context.details["reason"] == "outside_base"
 
 
-class TestPathValidatorUnicode:
-    """유니코드 경로 테스트."""
+class TestUnicodePathSupport:
+    """v0.2.6: OS상 정상인 유니코드 파일명은 모두 허용."""
 
     def test_japanese_path(self):
-        """일본어 경로 허용."""
-        result = validate_path("ドキュメント/ガイド.md")
-        assert result == "ドキュメント/ガイド.md"
+        assert validate_path("ドキュメント/ガイド.md") == "ドキュメント/ガイド.md"
 
     def test_chinese_path(self):
-        """중국어 경로 허용."""
-        result = validate_path("文档/指南.md")
-        assert result == "文档/指南.md"
+        assert validate_path("文档/指南.md") == "文档/指南.md"
 
-    def test_emoji_path_rejected(self):
-        """이모지 경로는 거부."""
-        with pytest.raises(InvalidPathError):
-            validate_path("docs/📚readme.md")
+    def test_emoji_path_now_allowed(self):
+        """v0.2.5까지는 거부했지만 OS가 받아주는 정상 파일명이므로 허용."""
+        assert validate_path("docs/📚readme.md") == "docs/📚readme.md"
+
+    def test_space_in_filename_allowed(self):
+        """v0.2.6 회귀 핵심: 한국어 공백 포함 파일명이 traversal로 오인되지 않아야 함.
+
+        장애 보고서의 실제 케이스: ``inbox/한수원 안전관리 SER 제안서.md``.
+        """
+        assert (
+            validate_path("inbox/한수원 안전관리 SER 제안서.md")
+            == "inbox/한수원 안전관리 SER 제안서.md"
+        )
+
+    def test_parentheses_brackets_allowed(self):
+        assert validate_path("notes/(draft) memo.md") == "notes/(draft) memo.md"
+        assert validate_path("notes/[v1] note.md") == "notes/[v1] note.md"
+
+    def test_apostrophe_allowed(self):
+        assert validate_path("notes/user's note.md") == "notes/user's note.md"
+
+    def test_semicolon_now_allowed(self):
+        """세미콜론은 OS상 정상 파일명. 명령어 인젝션 방어는 shell 호출 시점의 책임."""
+        assert validate_path("docs/file;backup.md") == "docs/file;backup.md"
+
+    def test_pipe_now_allowed(self):
+        assert validate_path("docs/a|b.md") == "docs/a|b.md"
+
+    def test_fullwidth_chars_pass_through(self):
+        """전각 마침표/슬래시는 OS상 별개 코드포인트로 처리되어 traversal 위험 없음.
+
+        ``..`` raw 매치는 이들에 매칭되지 않고 (``\\uff0e\\uff0e`` != ``..``),
+        ``_validate_within_base``의 resolve도 이를 디렉토리 이름으로 취급한다.
+        """
+        # 전각 문자 포함은 통과 (base_dir 없을 때)
+        assert validate_path("docs/．．/etc.md") == "docs/．．/etc.md"
 
 
 class TestPathTraversalAttacks:
-    """Path Traversal 공격 시나리오 테스트.
+    """명시 블랙리스트로 거부되는 traversal 시퀀스."""
 
-    다양한 우회 기법을 테스트하여 보안 취약점을 방지합니다.
-    """
-
-    def test_url_encoded_slash(self):
-        """URL 인코딩된 슬래시(%2f) 거부.
-
-        Note:
-            현재 구현은 허용 문자 패턴에서 % 문자를 허용하지 않으므로
-            자연스럽게 거부됩니다.
-        """
-        with pytest.raises(InvalidPathError):
+    def test_url_encoded_slash_rejected(self):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs%2f..%2f..%2fetc/passwd")
+        # raw .. 와 % 가 모두 있으므로 검사 순서상 둘 중 하나로 잡힘
+        assert exc.value.context.details["reason"] in {"percent_encoded", "parent_traversal"}
 
-    def test_url_encoded_double_dot(self):
-        """URL 인코딩된 .. (%2e%2e) 거부."""
-        with pytest.raises(InvalidPathError):
+    def test_url_encoded_double_dot_rejected(self):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs/%2e%2e/etc/passwd")
+        # %2e%2e는 .. 매치보다 % 매치가 먼저 잡힘 (검사 순서)
+        # 단 docs/.. 부분의 raw `..`가 먼저 잡힐 수도 있어 둘 중 하나면 OK.
+        assert exc.value.context.details["reason"] in {"percent_encoded", "parent_traversal"}
+
+    def test_percent_in_normal_filename_rejected(self):
+        """v0.2.6: % 자체가 거부 대상. ``사용률 95%.md`` 같은 정상 사용 파일도 거부.
+
+        보수적 안전 선택. 사용자가 % 쓰는 경우 percent 또는 다른 표기로 대체 권장.
+        """
+        with pytest.raises(InvalidPathError) as exc:
+            validate_path("docs/사용률 95%.md")
+        assert exc.value.context.details["reason"] == "percent_encoded"
 
     def test_null_byte_injection(self):
-        """널 바이트(\x00) 주입 거부.
-
-        Note:
-            널 바이트는 C 언어 기반 시스템에서 문자열 종료로 해석되어
-            경로 우회에 사용될 수 있습니다.
-        """
-        with pytest.raises(InvalidPathError):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs/readme\x00.md")
+        assert exc.value.context.details["reason"] == "null_byte"
 
     def test_null_byte_in_middle(self):
-        """경로 중간의 널 바이트 거부."""
-        with pytest.raises(InvalidPathError):
+        """``\\x00`` 검사가 raw ``..`` 검사보다 뒤에 있으므로 ``..``가 함께 있으면
+        parent_traversal로 먼저 잡힌다. 둘 중 하나로 거부되면 OK."""
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs\x00/../etc/passwd")
+        assert exc.value.context.details["reason"] in {"null_byte", "parent_traversal"}
 
-    def test_backslash_path(self):
-        """백슬래시(\\) 경로 거부.
-
-        Note:
-            Windows 스타일 경로 구분자는 Unix 시스템에서
-            Path Traversal에 악용될 수 있습니다.
-        """
-        with pytest.raises(InvalidPathError):
+    def test_backslash_path_rejected(self):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs\\..\\..\\etc\\passwd")
+        # 검사 순서상 `..`이 먼저 매치되거나 `\\`이 매치됨
+        assert exc.value.context.details["reason"] in {"parent_traversal", "backslash"}
 
-    def test_backslash_mixed_with_slash(self):
-        """백슬래시와 슬래시 혼용 거부."""
-        with pytest.raises(InvalidPathError):
+    def test_backslash_mixed_with_slash_rejected(self):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs\\readme/test.md")
+        assert exc.value.context.details["reason"] == "backslash"
 
-    def test_unicode_fullwidth_dot(self):
-        """유니코드 전각 마침표(U+FF0E) 거부.
-
-        Note:
-            U+FF0E (FULLWIDTH FULL STOP)는 일부 시스템에서
-            일반 마침표로 정규화될 수 있어 .. 우회에 사용됩니다.
-        """
-        with pytest.raises(InvalidPathError):
-            validate_path("docs/\uff0e\uff0e/etc/passwd")
-
-    def test_unicode_fullwidth_slash(self):
-        """유니코드 전각 슬래시(U+FF0F) 거부."""
-        with pytest.raises(InvalidPathError):
-            validate_path("docs\uff0f..\uff0fetc/passwd")
-
-    def test_unicode_fraction_slash(self):
-        """유니코드 분수 슬래시(U+2215) 거부."""
-        with pytest.raises(InvalidPathError):
-            validate_path("docs\u2215..\u2215etc/passwd")
-
-    def test_double_url_encoding(self):
-        """이중 URL 인코딩(%252f = %2f) 거부."""
-        with pytest.raises(InvalidPathError):
+    def test_double_url_encoding_rejected(self):
+        with pytest.raises(InvalidPathError) as exc:
             validate_path("docs%252f..%252fetc/passwd")
+        assert exc.value.context.details["reason"] in {"percent_encoded", "parent_traversal"}
 
-    def test_mixed_encoding_attack(self):
-        """혼합 인코딩 공격 거부."""
+    def test_mixed_encoding_attack_rejected(self):
         with pytest.raises(InvalidPathError):
             validate_path("docs/..%2f..%2fetc/passwd")
 
@@ -234,23 +204,61 @@ class TestPathTraversalAttacks:
             with pytest.raises(InvalidPathError):
                 validate_path(f"docs/{pattern}etc/passwd")
 
-    def test_control_characters(self):
-        """제어 문자 거부."""
-        control_chars = ["\r", "\n", "\t", "\v", "\f"]
-        for char in control_chars:
-            with pytest.raises(InvalidPathError):
-                validate_path(f"docs/readme{char}.md")
+    def test_control_characters_pass_or_blocked(self):
+        """v0.2.6: 제어 문자는 OS 정상 코드포인트이므로 명시 블랙리스트에 없음.
 
-    def test_semicolon_injection(self):
-        """세미콜론 주입 거부.
-
-        Note:
-            일부 시스템에서 세미콜론은 명령어 구분자로 사용됩니다.
+        단 ``\\r\\n``과 같이 사용 시 화면 표시가 깨질 수 있다는 우려는 별개 이슈.
+        path validator 책임 아님 — base_dir이 주어지면 resolve 단계에서 차단되거나
+        통과한다. 본 테스트는 명시적으로 거부되지 않음을 확인.
         """
-        with pytest.raises(InvalidPathError):
-            validate_path("docs/readme;rm -rf /.md")
+        result = validate_path("docs/readme\t.md")
+        assert "\t" in result
 
-    def test_pipe_injection(self):
-        """파이프(|) 주입 거부."""
-        with pytest.raises(InvalidPathError):
-            validate_path("docs/readme|cat /etc/passwd.md")
+
+class TestQueryValidator:
+    """validate_path_for_query — .md 정규화 / base_dir 없음."""
+
+    def test_query_does_not_add_md_extension(self):
+        """쿼리용은 확장자 정규화 안 함."""
+        assert validate_path_for_query("docs/readme") == "docs/readme"
+
+    def test_query_strips_whitespace(self):
+        assert validate_path_for_query("  docs/x.md  ") == "docs/x.md"
+
+    def test_query_rejects_empty(self):
+        with pytest.raises(InvalidPathError) as exc:
+            validate_path_for_query("")
+        assert exc.value.context.details["reason"] == "empty"
+
+    def test_query_rejects_parent_traversal(self):
+        with pytest.raises(InvalidPathError) as exc:
+            validate_path_for_query("../etc")
+        assert exc.value.context.details["reason"] == "parent_traversal"
+
+
+class TestErrorMessageHasReason:
+    """모든 InvalidPathError가 reason을 details에 포함해야 한다 (v0.2.6 회귀)."""
+
+    @pytest.mark.parametrize(
+        "path,expected_reason",
+        [
+            ("", "empty"),
+            ("   ", "empty"),
+            ("/abs", "absolute"),
+            ("../x", "parent_traversal"),
+            ("x\x00", "null_byte"),
+            ("x\\y", "backslash"),
+            ("x%2fy", "percent_encoded"),
+        ],
+    )
+    def test_each_branch_sets_reason(self, path: str, expected_reason: str):
+        with pytest.raises(InvalidPathError) as exc:
+            validate_path(path)
+        assert exc.value.context.details["reason"] == expected_reason
+
+    def test_backward_compat_reason_none(self):
+        """``InvalidPathError.of(path)``로 인자 1개 호출이 여전히 동작해야 한다."""
+        err = InvalidPathError.of("legacy/x.md")
+        assert err.context.details["path"] == "legacy/x.md"
+        assert err.context.details["reason"] is None
+        assert "Path traversal attempt" in str(err)

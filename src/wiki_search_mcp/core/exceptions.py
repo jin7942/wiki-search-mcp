@@ -117,14 +117,29 @@ class IndexNotFoundError(TechnicalException):
 
 
 class InvalidPathError(TechnicalException):
-    """경로 탐색 공격 시도."""
+    """유효하지 않은 경로 (빈/절대/.. /NUL/백슬래시/percent/base 밖/resolve 실패)."""
 
     @classmethod
-    def of(cls, path: str) -> InvalidPathError:
-        """팩토리 메서드: 경로로 예외 생성."""
+    def of(cls, path: str, reason: str | None = None) -> InvalidPathError:
+        """팩토리 메서드: 경로 + 거부 사유로 예외 생성.
+
+        Args:
+            path: 거부된 경로 문자열
+            reason: 거부 사유 (empty/absolute/parent_traversal/null_byte/
+                backslash/percent_encoded/outside_base/resolve_failed).
+                None이면 v0.2.5 이전 메시지 ``"Path traversal attempt"`` 유지
+                (backward compat).
+        """
+        if reason is None:
+            message = f"Path traversal attempt: {path}"
+        else:
+            message = f"Invalid path ({reason}): {path}"
         return cls(
-            f"Path traversal attempt: {path}",
-            ErrorContext(code="INVALID_PATH", details={"path": path}),
+            message,
+            ErrorContext(
+                code="INVALID_PATH",
+                details={"path": path, "reason": reason},
+            ),
         )
 
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from wiki_search_mcp.core.exceptions import InvalidPathError
 from wiki_search_mcp.core.models import Document
+from wiki_search_mcp.core.path_validator import validate_path_for_query
 from wiki_search_mcp.core.utils import normalize_document_path
 
 if TYPE_CHECKING:
@@ -116,6 +117,5 @@ class GraphService:
         return neighbors[:limit]
 
     def _validate_path(self, path: str) -> None:
-        """경로 유효성 검사."""
-        if ".." in path or path.startswith("/"):
-            raise InvalidPathError.of(path)
+        """경로 유효성 검사. ``path_validator``로 위임해 reason 분기를 일관되게 사용."""
+        validate_path_for_query(path)

@@ -3,6 +3,36 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.6] - 2026-05-18
+
+### Fixed
+
+- **공백/한글/이모지 포함 정상 파일명이 ``InvalidPathError``로 거부되던 오탐**: ``core/path_validator.py:25``의 ``SAFE_PATH_PATTERN`` 정규식 화이트리스트가 일반 공백(U+0020)을 누락해 ``inbox/한수원 안전관리 SER 제안서.md`` 같은 OS상 정상 파일명이 분류 단계에서 모두 거부됐다. 더 나쁜 건 로그가 ``Path traversal attempt: ...``로 찍혀 사용자가 진짜 공격으로 오인. 정규식 화이트리스트를 통째로 제거하고 ``..`` / ``/시작`` / ``\\x00`` / ``\\`` / ``%`` 명시 블랙리스트 + ``_validate_within_base`` 의 ``resolve() + is_relative_to(base)`` 를 traversal 방어의 단일 진실로 사용. Obsidian/Logseq/Notion 등 다른 PKM 도구의 관행과 일치.
+- **daemon ``error_count`` 가 silent 실패 2경로에서 증가 안 하던 가시성 결함**:
+  - ``runner.py:200~204`` 의 ``find_pending() failed`` (인덱스/디스크 스캔 예외)
+  - ``runner.py:217~221`` 의 ``queue full; dropping enqueue`` (큐 적체로 path 누락)
+  
+  운영자가 ``daemon_status.json`` 만 봐서는 두 실패를 인지할 수 없었음. 두 경로 모두 ``self._status.increment("error_count")`` 추가.
+
+### Changed
+
+- **``InvalidPathError.of(path, reason=None)`` 시그니처 확장**: 거부 사유 8종(``empty`` / ``absolute`` / ``parent_traversal`` / ``null_byte`` / ``backslash`` / ``percent_encoded`` / ``outside_base`` / ``resolve_failed``)을 ``context.details["reason"]`` 에 노출. 메시지는 reason 있으면 ``"Invalid path (absolute): /etc/passwd"`` 형식, 없으면 기존 ``"Path traversal attempt: ..."`` 유지(backward compat).
+- ``services/graph_service.py:_validate_path`` 가 자체 ``..``/``/`` 검사 대신 ``validate_path_for_query`` 로 위임. reason 분기를 일관되게 흘림.
+
+### Security
+
+- 화이트리스트 제거가 보안 약화로 보일 수 있지만, 실제 traversal 방어는 ``_validate_within_base`` 의 resolve+is_relative_to 가 담당하므로 방어 강도는 유지. 명시 블랙리스트에 ``%`` 를 추가해 URL 인코딩 우회 공격(``%2e%2e``, ``%2f``)을 보수적으로 차단. ``사용률 95%.md`` 같이 ``%`` 가 포함된 정상 파일은 거부되므로 ``percent`` 또는 다른 표기로 대체 필요.
+
+### Tests
+
+- ``tests/test_path_validator.py`` 전면 재구성:
+  - 정규식이 막던 OS 정상 파일명(이모지/세미콜론/파이프/전각 문자) 거부 케이스 4건 삭제 — 의도적 허용으로 전환
+  - 신규 8건: 공백 한글 파일명 / 괄호 대괄호 / apostrophe / 이모지 통과 / 전각 문자 통과 / 모든 reason 분기 검증(parametrize) / backward compat
+- ``tests/unit/infrastructure/test_daemon_error_count.py`` 신설 2건: ``find_pending`` 예외 / ``queue full`` 모두 ``error_count++``
+- 격리 실물 검증: 사용자 보고서의 실제 4개 파일명(``한수원 안전관리 SER 제안서.md`` 등) 통과 + 8개 attack 패턴(``/etc/passwd``, ``../``, ``\\x00``, ``\\``, ``%``, 빈) 모두 정확한 reason 으로 거부 확인.
+
+---
+
 ## [0.2.5] - 2026-05-17
 
 ### Fixed
