@@ -3,6 +3,27 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.2.7] - 2026-05-27
+
+### Fixed
+
+- **lancedb 0.13+ 의 ``list_tables()`` 반환 타입 변경에 미대응해 검색·통계가 전체 무력화되던 P0 회귀**: lancedb는 0.13 전후로 ``list_tables()`` 반환을 ``list[str]`` 에서 ``ListTablesResponse(tables=[...], page_token=...)`` 객체로 변경(pagination 도입)했다. ``vector_store.py:58`` 과 ``indexer.py:217`` 의 ``"wiki" in self._db.list_tables()`` 는 신버전에서 객체를 ``(field_name, value)`` 쌍으로 순회하므로 **항상 False**. 그 결과:
+  - ``LanceVectorStore.exists()`` → False → ``StatsService`` 가 ``total_pages=0``, ``SearchService`` / ``ValidationService`` 가 "Index not built yet" 반환.
+  - ``WikiIndexer.reindex()`` 는 게이트를 안 거쳐 정상 동작 → "reindex는 156건 indexed인데 stats는 0건" 모순의 정체.
+  - 증분 인덱싱 경로(``indexer.py:217``)도 기존 테이블 인식 실패 → 매번 사실상 full 재구축으로 떨어지던 잠재 비효율.
+  
+  ``infrastructure/storage/lancedb_compat.py`` 에 ``list_table_names(db)`` / ``has_table(db, name)`` 헬퍼 신설. 반환이 ``ListTablesResponse`` 면 ``.tables`` 에서, ``list`` 면 그대로 정규화해 신/구버전 모두에서 동작. 두 호출처를 ``has_table`` 로 전환.
+
+### Changed
+
+- **``lancedb`` 의존성에 상한 추가** (``>=0.4.0`` → ``>=0.4.0,<0.31``): 상한 부재가 0.30.2 의 breaking change 를 자유롭게 끌어들여 P0 를 유발한 구조적 원인. 검증된 0.30.x 까지로 제한. (헬퍼가 버전 호환을 흡수하므로 추후 상한 상향은 동작 확인 후 진행.)
+
+### Tests
+
+- ``tests/unit/infrastructure/test_lancedb_compat.py`` 신설 9건: 신버전(ListTablesResponse) / 구버전(list[str]) / 빈 경우 + ``in`` 직접 사용 시 False 가 되는 함정 고정 + 실물 lancedb create→has_table end-to-end.
+- ``tests/unit/infrastructure/test_vector_store.py::test_exists_returns_true_when_table_exists`` 가 수정 전 코드에서 FAIL → 수정 후 PASS 확인 (회귀 실증).
+- 격리 실물 검증: ``WikiIndexer.reindex(full=True)`` → 1 indexed, 파일 추가 후 ``reindex(full=False)`` → 2 indexed (증분 경로 기존 테이블 인식), ``exists()`` True, doc count 2.
+
 ## [0.2.6] - 2026-05-18
 
 ### Fixed

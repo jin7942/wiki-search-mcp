@@ -20,6 +20,7 @@ from wiki_search_mcp.core.logging import get_logger
 from wiki_search_mcp.core.types import ConfidenceDict, FrontmatterDict
 from wiki_search_mcp.core.utils import parse_frontmatter, resolve_pages_path, tokenize
 from wiki_search_mcp.infrastructure.ignore import IgnoreMatcher
+from wiki_search_mcp.infrastructure.storage.lancedb_compat import has_table
 
 logger = get_logger("indexer")
 
@@ -214,7 +215,7 @@ class WikiIndexer:
 
         # 기존 테이블에서 레코드 로드 (증분 인덱싱용)
         existing_records: dict[str, dict] = {}
-        if not full and "wiki" in self.db.list_tables():
+        if not full and has_table(self.db, "wiki"):
             table = self.db.open_table("wiki")
             for row in table.to_arrow().to_pylist():
                 existing_records[row["path"]] = row

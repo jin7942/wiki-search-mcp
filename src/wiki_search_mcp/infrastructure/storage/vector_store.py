@@ -19,6 +19,7 @@ import lancedb
 
 from wiki_search_mcp.core.exceptions import IndexNotFoundError, InvalidPathError
 from wiki_search_mcp.core.path_validator import validate_path_for_query
+from wiki_search_mcp.infrastructure.storage.lancedb_compat import has_table
 
 
 class LanceVectorStore:
@@ -55,7 +56,7 @@ class LanceVectorStore:
         매 검색마다 open_table()을 호출하는 대신 캐시된 참조를 사용합니다.
         """
         if self._table_cache is None:
-            if "wiki" in self._db.list_tables():
+            if has_table(self._db, "wiki"):
                 self._table_cache = self._db.open_table("wiki")
         return self._table_cache
 
