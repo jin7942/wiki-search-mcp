@@ -197,6 +197,41 @@ def _build_options(wiki: Path, kw: dict) -> DaemonOptions:
     )
 
 
+def _maybe_migrate_state(wiki: Path) -> None:
+    """vault 경로 이전으로 고립된 옛 daemon state 를 안전 조건 하에 자동 이전.
+
+    안전 조건(``auto_migrate_if_safe``)을 만족하면 조용히 이전하고 결과를 echo한다.
+    후보가 여러 개라 자동 이전을 보류한 경우, 사용자가 직접 정리하도록 안내만 한다.
+    """
+    from wiki_search_mcp.infrastructure.daemon.state_migrate import (
+        auto_migrate_if_safe,
+        find_stale_candidates,
+    )
+
+    migrated = auto_migrate_if_safe(wiki)
+    if migrated is not None:
+        click.echo(
+            f"옛 작업 이력을 이전했습니다 "
+            f"(applied={migrated.applied_count}, pending={migrated.pending_count}, "
+            f"이전 경로={migrated.recorded_wiki_path})."
+        )
+        return
+    # 자동 이전 안 된 경우 — 후보가 2개 이상이면 안내
+    candidates = find_stale_candidates(wiki)
+    if len(candidates) > 1:
+        click.echo(
+            f"[주의] 이전 가능한 옛 state 디렉토리가 {len(candidates)}개 발견됐습니다. "
+            "어느 것이 현재 vault의 이력인지 모호해 자동 이전을 건너뜁니다.",
+            err=True,
+        )
+        for c in candidates:
+            click.echo(
+                f"  - {c.state_dir} (applied={c.applied_count}, "
+                f"pending={c.pending_count}, wiki_path={c.recorded_wiki_path})",
+                err=True,
+            )
+
+
 def _wait_for_pidfile(path: Path, *, timeout: float) -> int | None:
     """daemon이 PID 파일을 쓸 때까지 대기. 성공 시 PID 반환, 실패 시 None."""
     deadline = time.monotonic() + timeout
@@ -252,6 +287,8 @@ def start(wiki_path: str | None, **kw: object) -> None:
         raise click.ClickException(
             f"daemon이 이미 실행 중입니다 (pid={pid}). 먼저 `daemon stop` 을 실행하세요."
         )
+
+    _maybe_migrate_state(wiki)
 
     opts = _build_options(wiki, kw)  # type: ignore[arg-type]
 
@@ -410,6 +447,121 @@ def rollback(wiki_path: str | None, last_n: int, dry_run: bool, force: bool) -> 
     service = RollbackService(applied_log=applied_log, pages_path=container.pages_path)
     results = service.rollback_last(last_n, dry_run=dry_run)
     click.echo(json.dumps({"dry_run": dry_run, "count": len(results), "results": results}, ensure_ascii=False, indent=2))
+
+
+@daemon.command("install")
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
+def install(wiki_path: str | None) -> None:
+    """daemon을 OS 서비스로 등록해 죽으면 자동 재기동되게 합니다.
+
+    macOS는 launchd LaunchAgent, Linux는 systemd user service를 생성/로드합니다.
+    OS가 supervisor 역할을 하므로 로그아웃/재부팅 후에도 daemon이 자동 기동됩니다.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    from wiki_search_mcp.infrastructure.daemon.service_unit import (
+        build_unit,
+        resolve_cli_path,
+    )
+
+    wiki = _resolve_wiki_path(wiki_path)
+    _check_claude_cli_or_die()
+    _check_claude_logged_in_or_hint()
+
+    cli = resolve_cli_path()
+    try:
+        unit = build_unit(wiki, cli, log_file(wiki))
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from e
+
+    unit.unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit.unit_path.write_text(unit.content, encoding="utf-8")
+    click.echo(f"유닛 파일 생성: {unit.unit_path}")
+
+    if unit.kind == "launchd":
+        # 기존 로드 해제 후 재로드 (idempotent)
+        subprocess.run(
+            ["launchctl", "unload", str(unit.unit_path)],
+            capture_output=True,
+            check=False,
+        )
+        result = subprocess.run(
+            ["launchctl", "load", str(unit.unit_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise click.ClickException(
+                f"launchctl load 실패: {result.stderr.strip()}"
+            )
+        click.echo(f"launchd 서비스 로드됨: {unit.label}")
+    else:  # systemd
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            capture_output=True,
+            check=False,
+        )
+        result = subprocess.run(
+            ["systemctl", "--user", "enable", "--now", f"{unit.label}.service"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise click.ClickException(
+                f"systemctl enable --now 실패: {result.stderr.strip()}\n"
+                "user service가 로그아웃 후에도 동작하려면 `loginctl enable-linger` 가 "
+                "필요할 수 있습니다."
+            )
+        click.echo(f"systemd 서비스 활성화됨: {unit.label}")
+
+    click.echo("daemon이 OS에 의해 자동 관리됩니다 (죽으면 재기동).")
+    click.echo(f"상태 확인: wiki-search-mcp daemon status {wiki}")
+
+
+@daemon.command("uninstall")
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
+def uninstall(wiki_path: str | None) -> None:
+    """``daemon install`` 로 등록한 OS 서비스를 해제하고 유닛 파일을 삭제합니다.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    from wiki_search_mcp.infrastructure.daemon.service_unit import (
+        build_unit,
+        resolve_cli_path,
+    )
+
+    wiki = _resolve_wiki_path(wiki_path)
+    try:
+        unit = build_unit(wiki, resolve_cli_path(), log_file(wiki))
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from e
+
+    if unit.kind == "launchd":
+        subprocess.run(
+            ["launchctl", "unload", str(unit.unit_path)],
+            capture_output=True,
+            check=False,
+        )
+    else:  # systemd
+        subprocess.run(
+            ["systemctl", "--user", "disable", "--now", f"{unit.label}.service"],
+            capture_output=True,
+            check=False,
+        )
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            capture_output=True,
+            check=False,
+        )
+
+    if unit.unit_path.exists():
+        unit.unit_path.unlink()
+        click.echo(f"유닛 파일 삭제: {unit.unit_path}")
+    else:
+        click.echo("등록된 유닛 파일이 없습니다.")
+    click.echo(f"서비스 해제됨: {unit.label}")
 
 
 __all__ = ["daemon"]

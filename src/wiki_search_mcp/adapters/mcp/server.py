@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import atexit
 import logging
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from wiki_search_mcp.core.exceptions import DaemonError
 from wiki_search_mcp.core.logging import setup_logging
 from wiki_search_mcp.core.utils import resolve_pages_path
 from wiki_search_mcp.infrastructure.indexing import WikiIndexer
@@ -101,6 +103,8 @@ _options: ServerOptions | None = None
 _container: ServiceContainer | None = None
 _indexer: WikiIndexer | None = None
 _watcher: WikiWatcher | None = None
+# serve 단일 인스턴스 락. 프로세스 생명주기 동안 보유하고 atexit에서 release.
+_serve_lock = None  # PidLock | None
 
 
 def _require_options() -> ServerOptions:
@@ -664,6 +668,42 @@ def wiki_suggest_classification(path: str) -> str:
 # =============================================================================
 
 
+def _acquire_serve_lock(wiki_path: Path) -> bool:
+    """serve 단일 인스턴스 락 획득.
+
+    같은 vault에 대해 이미 serve 인스턴스가 실행 중이면 중복 기동을 막는다.
+    Claude Desktop이 재시작 등으로 serve를 중복 spawn하면 file watcher가 같은
+    파일을 두 번 보고 reindex가 중복 트리거되어 LanceDB 매니페스트 race가 날 수 있다.
+
+    Args:
+        wiki_path: wiki 루트
+
+    Returns:
+        락 획득 성공 시 True. 이미 실행 중이면 False.
+    """
+    global _serve_lock
+    from wiki_search_mcp.infrastructure.daemon.paths import (
+        serve_lock_file,
+        serve_pid_file,
+    )
+    from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
+
+    lock = PidLock(serve_lock_file(wiki_path), serve_pid_file(wiki_path))
+    try:
+        lock.acquire()
+    except DaemonError as e:
+        existing = e.context.details.get("pid") if e.context else None
+        logger.error(
+            "another wiki-search serve is already running for this vault "
+            "(pid=%s); exiting to avoid duplicate watchers",
+            existing,
+        )
+        return False
+    _serve_lock = lock
+    atexit.register(lock.release)
+    return True
+
+
 def main(options: ServerOptions) -> None:
     """MCP 서버 실행.
 
@@ -677,6 +717,10 @@ def main(options: ServerOptions) -> None:
 
     # 로깅 초기화 (CLI 옵션 기반)
     setup_logging(level=options.log_level, log_file=options.log_file)
+
+    # 단일 인스턴스 락 — 같은 vault 중복 serve 방지
+    if not _acquire_serve_lock(options.wiki_path):
+        sys.exit(0)
 
     # 파일 감시 시작
     start_watcher()

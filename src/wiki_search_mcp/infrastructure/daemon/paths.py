@@ -36,6 +36,20 @@ def state_lock_file(wiki_path: Path) -> Path:
     return state_dir(wiki_path) / "daemon.lock"
 
 
+def serve_pid_file(wiki_path: Path) -> Path:
+    """MCP serve 프로세스용 PID 파일 (daemon과 별도).
+
+    같은 vault에 대해 serve 인스턴스가 중복 기동되는 것을 막기 위한 단일 인스턴스
+    표식. daemon.pid 와 구분해 두 프로세스가 독립적으로 락을 잡도록 한다.
+    """
+    return state_dir(wiki_path) / "serve.pid"
+
+
+def serve_lock_file(wiki_path: Path) -> Path:
+    """MCP serve 프로세스용 flock 락 파일 (daemon.lock 과 별도)."""
+    return state_dir(wiki_path) / "serve.lock"
+
+
 def log_file(wiki_path: Path) -> Path:
     return state_dir(wiki_path) / "daemon.log"
 

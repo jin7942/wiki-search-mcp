@@ -73,3 +73,17 @@ def test_instructions_mandates_inbox_for_new_notes():
     assert "inbox" in text
     # "반드시" 같은 강제 표현 또는 명시적 영문 강제어 중 하나는 포함되어야 함
     assert any(kw in text for kw in ("반드시", "언제나", "MUST", "must"))
+
+
+def test_instructions_inbox_rule_is_top_priority_v030():
+    """v0.3.0: inbox 강제 규칙이 최우선 + 금지/자가확인 형태로 강화되어야 한다.
+
+    이전에는 권고 톤("따르세요")이라 Claude가 카테고리를 추측해 폴더에 직접
+    작성하는 경우가 있었다. v0.3.0은 '최우선 규칙' 섹션 + '금지' + 자가 확인
+    체크리스트로 명령 강도를 높였다.
+    """
+    text = WIKI_INSTRUCTIONS
+    assert "최우선" in text
+    assert "금지" in text
+    assert "직접 작성" in text
+    assert "자가 확인" in text

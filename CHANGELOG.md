@@ -3,6 +3,30 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.3.0] - 2026-05-27
+
+사용자 환경 진단 보고서(0.2.6)의 부차 결함 P2/P3 및 신규 문서 inbox 우회 문제를 일괄 해결.
+
+### Added
+
+- **``daemon install`` / ``daemon uninstall`` — OS 레벨 자동 재기동 (P2)**: daemon이 죽어도 아무도 살리지 않아 inbox 자동분류가 사실상 멈추던 문제. macOS는 launchd LaunchAgent(``KeepAlive``), Linux는 systemd user service(``Restart=always``)를 생성/로드해 OS가 supervisor 역할을 한다. vault 경로 해시로 유닛을 격리해 여러 vault를 동시 등록 가능. 유닛 텍스트 생성은 ``infrastructure/daemon/service_unit.py`` 의 순수 함수로 분리(테스트 가능).
+- **vault 경로 이전 시 옛 daemon state 자동 탐지/이전 (P3)**: state 디렉토리는 ``sha1(wiki_path)[:12]`` 로 격리되는데, vault를 옮기면 해시가 바뀌어 옛 작업 이력(applied 17건 + pending 1603건 등)이 고립됐다. ``daemon start`` 시 ``infrastructure/daemon/state_migrate.py`` 가 안전 조건 하에 자동 이전: 새 경로 state가 비어 있고 + 데이터를 가진 옛 후보가 **정확히 1개일 때만** 복사. 후보가 2개 이상이면 모호하므로 자동 이전하지 않고 안내만 표시(오탐 방지 우선).
+
+### Fixed
+
+- **MCP serve 중복 기동 (P2)**: serve 진입점이 기존 인스턴스 검사 없이 새 프로세스를 띄워 같은 vault에 serve가 3개까지 동시 실행되던 문제. file watcher가 같은 파일을 두 번 보고 reindex가 중복 트리거되어 LanceDB 매니페스트 race 위험. serve 전용 PidLock(``serve.lock`` / ``serve.pid``, daemon 것과 별도)을 추가해 두 번째 인스턴스는 ``sys.exit(0)`` 으로 깨끗하게 종료.
+
+### Changed
+
+- **MCP instructions의 inbox 강제 규칙을 최우선 + 단정형으로 강화**: 신규 문서를 카테고리 폴더에 직접 작성해 daemon 자동 분류 경로를 우회하는 문제가 잔존. 권고 톤("따르세요")을 "[최우선 규칙]" 섹션 + 파일 작성 전 자가 확인 체크리스트 + "금지/강제" 명시로 전환. read-only 원칙은 유지(서버가 강제 못 하므로 Claude가 스스로 지키도록 명령 강도만 높임).
+
+### Tests
+
+- ``tests/unit/infrastructure/test_state_migrate.py`` 신설: 단일 후보 이전 / 새 경로에 데이터 있으면 skip / 후보 2개 이상이면 보류 / 현재 디렉토리 제외 / 빈 경우.
+- ``tests/unit/infrastructure/test_service_unit.py`` 신설: launchd KeepAlive+RunAtLoad / systemd Restart=always / ExecStart 정확성 / 폴백 CLI argv split / 같은 vault 동일 label.
+- ``tests/unit/adapters/test_serve_lock.py`` 신설: serve/daemon 락 파일 분리 / 두 번째 serve 거부 / ``_acquire_serve_lock`` True·False.
+- ``tests/unit/adapters/test_instructions.py``: v0.3.0 최우선 규칙 + 금지 + 자가 확인 체크리스트 회귀 1건 추가.
+
 ## [0.2.7] - 2026-05-27
 
 ### Fixed
