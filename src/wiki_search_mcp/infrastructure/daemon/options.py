@@ -25,7 +25,18 @@ class DaemonOptions:
         rate_per_minute / rate_per_hour / rate_per_day: rate-limit 설정
         rate_max_wait_s: rate-limit 대기 허용 한도
         debounce: watcher 디바운스 (초)
+        quiescence_seconds: 파일이 정적 상태로 머물러야 분류 진입을 허용하는 최소 시간(초).
+            사용자가 작성 중인 inbox 파일이 즉시 분류되어 다른 폴더로 이동하는 것을 막는다.
+            ``_classify_and_apply`` 진입 시점에 ``now - mtime < quiescence_seconds`` 이면
+            짧은 cooldown 후 다음 rescan에서 재시도한다.
+        min_body_chars: 분류 진입을 허용하는 본문(frontmatter 제외) 최소 길이.
+            너무 짧은 초안에 LLM이 호출되어 미완성 본문으로 카테고리가 결정되는 것을 막는다.
+        rescan_interval_seconds: 외부 FS 이벤트가 없어도 daemon이 스스로 ``_rescan()`` 을
+            호출하는 주기(초). 0 이하면 비활성. cooldown 만료 후 영원히 안 깨어나는
+            문제를 방지.
         auto_move: 카테고리 폴더로 이동 여부
+        rewrite_inbound_links: 파일 이동 시 다른 파일 본문에 박힌 wikilink(``[[옛 경로]]``)
+            를 새 경로로 일괄 보정할지 여부. 깨진 링크 누적 방지.
         log_level: 로그 레벨
         provider_factory: ``LLMProvider`` 생성 함수 (테스트에서 FakeProvider 주입용)
         ignore_patterns: 추가 무시 패턴
@@ -42,7 +53,11 @@ class DaemonOptions:
     rate_per_day: int = 500
     rate_max_wait_s: float = 30.0
     debounce: float = 2.0
+    quiescence_seconds: float = 60.0
+    min_body_chars: int = 200
+    rescan_interval_seconds: float = 300.0
     auto_move: bool = True
+    rewrite_inbound_links: bool = True
     log_level: str = "INFO"
     ignore_patterns: tuple[str, ...] = field(default_factory=tuple)
     provider_factory: Callable[[], "LLMProvider"] | None = None

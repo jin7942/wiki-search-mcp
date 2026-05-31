@@ -101,7 +101,13 @@ def _make_runner_with_fake(wiki: Path, provider: _FakeProvider, threshold: float
         rate_per_hour=999,
         rate_per_day=999,
         debounce=0.1,
+        # 본 통합 테스트는 daemon 라이프사이클 자체를 검증하므로 v0.4.0
+        # 신규 가드(파일 막 생성 → 즉시 분류 차단)를 비활성화한다.
+        quiescence_seconds=0.0,
+        min_body_chars=0,
+        rescan_interval_seconds=0.0,
         auto_move=True,
+        rewrite_inbound_links=False,
         log_level="WARNING",
         provider_factory=lambda: provider,
     )

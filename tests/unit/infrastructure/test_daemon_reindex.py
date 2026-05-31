@@ -39,6 +39,9 @@ def _build_runner(wiki: Path, decision_cls):
         wiki_path=wiki,
         queue_max=100,
         provider_factory=lambda: fake_provider,
+        # 본 테스트는 reindex 동시성/카운터 회귀가 목적이므로
+        # 신규 가드(quiescence)는 비활성화해 분류 진입을 막지 않도록 한다.
+        quiescence_seconds=0.0,
     )
     with patch(
         "wiki_search_mcp.infrastructure.daemon.runner.WikiIndexer"

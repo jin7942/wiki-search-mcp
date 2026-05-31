@@ -19,13 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 CLASSIFY_SYSTEM_PROMPT = """\
-You classify a single Markdown note into one of the user's existing categories.
+You classify a single Markdown note into one of the user's existing categories,
+and optionally into one of that category's existing subfolders.
 
 Rules (strict):
 - Output a single JSON object only. No prose, no markdown fence, no comments.
-- Schema: {"category": str, "tags": [str, ...], "confidence": number, "reasoning": str}
+- Schema: {"category": str, "subcategory": str|null, "tags": [str, ...], "confidence": number, "reasoning": str}
 - "category" MUST be exactly one of the active_categories list provided by the user.
   If none fits, use the literal string "uncategorized".
+- "subcategory":
+  - If the user provides subfolders_by_category[category] and one clearly fits the note,
+    set it to that exact subfolder name. The note will be placed at
+    <category>/<subcategory>/<basename>.
+  - Otherwise, set it to null. Do NOT invent new subfolders.
 - "tags": 1 to 5 short lowercase tokens that describe the note topic. No leading '#'.
 - "confidence": float in [0.0, 1.0]. Use >=0.7 only when the note clearly belongs to the chosen category.
 - "reasoning": one short sentence (<= 200 chars) in the same language as the note.
@@ -41,9 +47,13 @@ def build_user_prompt(req: ClassificationRequest) -> str:
     sim = hints.get("similar_paths") or []
     active = list(req.active_categories) or ["uncategorized"]
     body = req.body_preview or ""
+    # subfolders 는 dict[str, tuple] — JSON 직렬화 위해 dict[str, list] 로 변환.
+    subfolders_raw = req.subfolders_by_category or {}
+    subfolders = {k: list(v) for k, v in subfolders_raw.items()}
     return (
         f"path: {req.path}\n"
         f"active_categories: {json.dumps(active, ensure_ascii=False)}\n"
+        f"subfolders_by_category: {json.dumps(subfolders, ensure_ascii=False)}\n"
         f"heuristic_hints:\n"
         f"  category_candidates: {json.dumps(list(cat_hints), ensure_ascii=False)}\n"
         f"  tag_candidates: {json.dumps(list(tag_hints), ensure_ascii=False)}\n"
@@ -64,8 +74,14 @@ def parse_decision(
     raw: str,
     provider: str,
     active_categories: tuple[str, ...],
+    subfolders_by_category: dict[str, tuple[str, ...]] | None = None,
 ) -> ClassificationDecision:
     """LLM 응답 텍스트에서 첫 JSON 객체를 추출 + 검증 → ``ClassificationDecision``.
+
+    Args:
+        subfolders_by_category: 각 카테고리의 활성 서브폴더 화이트리스트. 주어지면
+            LLM 이 제안한 ``subcategory`` 가 해당 카테고리의 화이트리스트에 있을 때만
+            채택하고, 아니면 ``None`` 으로 강등 (임의 서브폴더 생성 방지).
 
     Raises:
         ClassifierError: JSON 파싱/필드 검증 실패
@@ -94,6 +110,7 @@ def parse_decision(
         raise ClassifierError.of("response is not a JSON object", code="INVALID_JSON")
 
     category = obj.get("category")
+    subcategory_raw = obj.get("subcategory")
     tags_raw = obj.get("tags", [])
     confidence_raw = obj.get("confidence")
     reasoning = obj.get("reasoning", "")
@@ -118,6 +135,28 @@ def parse_decision(
         )
         category = "uncategorized"
 
+    # subcategory 정규화 — 화이트리스트에 있을 때만 채택.
+    subcategory: str | None = None
+    if isinstance(subcategory_raw, str) and subcategory_raw.strip():
+        candidate = subcategory_raw.strip()
+        whitelist = (subfolders_by_category or {}).get(category, ())
+        if candidate in whitelist:
+            subcategory = candidate
+        else:
+            if whitelist:
+                logger.warning(
+                    "LLM proposed unknown subcategory %r for %r (active=%s); dropping",
+                    candidate,
+                    category,
+                    list(whitelist),
+                )
+            else:
+                logger.debug(
+                    "LLM proposed subcategory %r for %r but no subfolders are active; dropping",
+                    candidate,
+                    category,
+                )
+
     confidence = max(0.0, min(1.0, float(confidence_raw)))
     raw_trunc = raw.strip()
     if len(raw_trunc) > 200:
@@ -126,6 +165,7 @@ def parse_decision(
     return ClassificationDecision(
         path=path,
         category=category,
+        subcategory=subcategory,
         tags=tags,
         confidence=confidence,
         reasoning=reasoning[:300],

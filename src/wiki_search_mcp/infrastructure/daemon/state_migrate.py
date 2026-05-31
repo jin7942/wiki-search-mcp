@@ -143,8 +143,74 @@ def auto_migrate_if_safe(wiki_path: Path) -> StaleStateCandidate | None:
     return src
 
 
+def migrate_from(src: Path, wiki_path: Path, *, overwrite: bool = False) -> StaleStateCandidate:
+    """사용자가 지정한 옛 state 디렉토리를 현재 wiki 의 state 디렉토리로 복사한다.
+
+    ``auto_migrate_if_safe`` 가 후보 2개 이상 등 안전 조건을 만족 못 해 자동 이전을
+    포기한 경우의 수동 fallback.
+
+    Args:
+        src: 옛 state 디렉토리(또는 그 안의 daemon_status.json 경로).
+        wiki_path: 현재 wiki 루트.
+        overwrite: True 면 현재 state 에 데이터가 있어도 덮어쓴다 (위험).
+
+    Returns:
+        이전된 후보 정보.
+
+    Raises:
+        FileNotFoundError: ``src`` 가 디렉토리가 아니거나 마이그레이션 대상 파일이 전무.
+        FileExistsError: 현재 state 에 이미 데이터가 있고 ``overwrite=False``.
+    """
+    src = src.expanduser().resolve()
+    if src.is_file():
+        # daemon_status.json 등 파일 경로가 넘어오면 부모를 source 로.
+        src = src.parent
+    if not src.is_dir():
+        raise FileNotFoundError(f"source state directory not found: {src}")
+
+    current = state_dir(wiki_path)
+    if not overwrite and _state_has_data(current):
+        raise FileExistsError(
+            f"current state already has data: {current}. Use overwrite=True to force."
+        )
+
+    if src == current:
+        raise FileNotFoundError(
+            f"source equals current state directory: {src}. Nothing to migrate."
+        )
+
+    copied: list[str] = []
+    for name in _MIGRATE_FILES:
+        src_file = src / name
+        if src_file.exists():
+            shutil.copy2(src_file, current / name)
+            copied.append(name)
+    if not copied:
+        raise FileNotFoundError(
+            f"no migratable files in {src} "
+            f"(expected any of: {', '.join(_MIGRATE_FILES)})"
+        )
+
+    candidate = StaleStateCandidate(
+        state_dir=src,
+        recorded_wiki_path=_read_recorded_wiki_path(src / "daemon_status.json"),
+        applied_count=_count_lines(src / "applied.jsonl"),
+        pending_count=_count_lines(src / "pending.jsonl"),
+    )
+    logger.info(
+        "manually migrated daemon state: %s -> %s (files=%s, applied=%d, pending=%d)",
+        src,
+        current,
+        copied,
+        candidate.applied_count,
+        candidate.pending_count,
+    )
+    return candidate
+
+
 __all__ = [
     "StaleStateCandidate",
     "auto_migrate_if_safe",
     "find_stale_candidates",
+    "migrate_from",
 ]

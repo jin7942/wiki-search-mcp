@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,18 +71,149 @@ def _atomic_write(target: Path, content: str) -> None:
         raise
 
 
-def _decide_target_path(rel_path: str, category: str) -> str:
-    """카테고리 폴더로 이동할 새 상대 경로 결정.
+def _decide_target_path(
+    rel_path: str, category: str, subcategory: str | None = None
+) -> str:
+    """카테고리(+서브카테고리) 폴더로 이동할 새 상대 경로 결정.
 
-    - 첫 컴포넌트가 이미 ``category``이면 그대로 유지.
-    - 아니면 ``<category>/<basename>``로 이동.
+    - ``subcategory`` 가 주어지면 목적지는 ``<category>/<subcategory>/<basename>``.
+    - 그렇지 않고 첫 컴포넌트가 이미 ``category`` 면 원경로 유지.
+    - 그 외엔 ``<category>/<basename>``.
     - 동일 basename이 대상에 이미 있으면 호출자가 직접 충돌 회피 (여기서는 경로만 계산).
     """
-    parts = Path(rel_path).parts
     basename = Path(rel_path).name
+    parts = Path(rel_path).parts
+
+    sub = (subcategory or "").strip()
+    if sub:
+        # 이미 같은 <category>/<subcategory>/ 안에 있으면 그대로 유지.
+        if len(parts) >= 2 and parts[0] == category and parts[1] == sub:
+            return rel_path
+        return str(Path(category) / sub / basename)
+
     if parts and parts[0] == category:
         return rel_path
     return str(Path(category) / basename)
+
+
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
+
+
+def _wikilink_targets_for(old_rel: str) -> set[str]:
+    """``old_rel`` 을 참조했을 가능성이 있는 wikilink 표기 후보들.
+
+    옵시디언/Logseq 관행 상 wikilink 는 다음 형태 중 하나로 자주 쓰인다:
+    - 전체 상대 경로 (``[[projects/foo/bar.md]]``)
+    - 경로(확장자 생략) (``[[projects/foo/bar]]``)
+    - basename 만 (``[[bar.md]]`` 또는 ``[[bar]]``) — vault 전역 고유라는 옵시디언 기본 가정
+
+    경로 표기는 곧바로 새 경로로 갈아끼우면 되고, basename-only 표기는 vault 안에
+    동일 basename 의 다른 파일이 없을 때만 안전하게 치환한다 (호출자가 충돌 검사).
+    """
+    candidates: set[str] = set()
+    candidates.add(old_rel)
+    if old_rel.endswith(".md"):
+        candidates.add(old_rel[:-3])
+    stem = Path(old_rel).stem
+    candidates.add(stem)
+    candidates.add(f"{stem}.md")
+    return candidates
+
+
+def _split_link_and_label(inside: str) -> tuple[str, str | None]:
+    """``[[link|label]]`` 의 link / label 분리. label 없으면 ``(link, None)``."""
+    if "|" in inside:
+        link, label = inside.split("|", 1)
+        return link.strip(), label
+    return inside.strip(), None
+
+
+def _split_link_and_anchor(link: str) -> tuple[str, str]:
+    """``link#heading`` 의 본체 / ``#heading`` (또는 ``""``) 분리."""
+    if "#" in link:
+        head, anchor = link.split("#", 1)
+        return head, f"#{anchor}"
+    return link, ""
+
+
+def _has_basename_duplicate(pages: Path, basename: str) -> bool:
+    """vault 안에 동일 basename(.md) 파일이 2개 이상 있는지.
+
+    True 면 basename-only wikilink 가 어느 파일을 가리키는지 모호하므로 치환하지 않는다.
+    """
+    target_name = basename if basename.endswith(".md") else f"{basename}.md"
+    seen = 0
+    for p in pages.rglob(target_name):
+        seen += 1
+        if seen >= 2:
+            return True
+    return False
+
+
+def _rewrite_inbound_wikilinks(pages: Path, old_rel: str, new_rel: str) -> int:
+    """``[[old_rel]]`` / ``[[old_stem]]`` 등을 ``[[new_rel(.md 제외)]]`` 로 치환.
+
+    Args:
+        pages: pages 루트
+        old_rel: 옮기기 전 상대 경로 (예: ``inbox/foo.md``)
+        new_rel: 옮긴 후 상대 경로 (예: ``projects/myproj/foo.md``)
+
+    Returns:
+        본문이 실제로 갱신된 파일 수.
+
+    안전 정책:
+    - 옮긴 파일 자신은 건드리지 않는다.
+    - basename 만 쓰인 링크는 vault 안 동일 basename 이 유일할 때만 치환.
+    - 본문에 변화가 없으면 파일을 다시 쓰지 않는다 (mtime 보존 + watchdog 폭주 회피).
+    """
+    if old_rel == new_rel:
+        return 0
+
+    old_candidates = _wikilink_targets_for(old_rel)
+    # 새 링크는 ``.md`` 없이 정규화 — Obsidian 관행과 호환.
+    new_link_norm = new_rel[:-3] if new_rel.endswith(".md") else new_rel
+
+    old_basename = Path(old_rel).name
+    basename_safe = not _has_basename_duplicate(pages, old_basename)
+
+    rewritten = 0
+    for md in pages.rglob("*.md"):
+        try:
+            rel = md.relative_to(pages)
+        except ValueError:
+            continue
+        rel_str = str(rel).replace("\\", "/")
+        if rel_str == new_rel or rel_str == old_rel:
+            continue
+
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        def _sub(m: re.Match[str]) -> str:
+            inside = m.group(1)
+            link, label = _split_link_and_label(inside)
+            head, anchor = _split_link_and_anchor(link)
+            head_norm = head.strip()
+            if head_norm not in old_candidates:
+                return m.group(0)
+            # basename-only 인 링크는 vault 전역 unique 일 때만 치환.
+            if head_norm in {Path(old_rel).stem, Path(old_rel).name} and not basename_safe:
+                return m.group(0)
+            new_inside = f"{new_link_norm}{anchor}"
+            if label is not None:
+                new_inside = f"{new_inside}|{label}"
+            return f"[[{new_inside}]]"
+
+        new_text = _WIKILINK_RE.sub(_sub, text)
+        if new_text != text:
+            try:
+                _atomic_write(md, new_text)
+                rewritten += 1
+            except OSError as e:
+                logger.warning("inbound rewrite write failed for %s: %s", rel_str, e)
+    return rewritten
 
 
 def _avoid_collision(pages: Path, rel: str) -> str:
@@ -102,8 +234,19 @@ def _avoid_collision(pages: Path, rel: str) -> str:
 class FrontmatterWriter:
     """frontmatter 적용 + 파일 이동을 원자적으로 수행."""
 
-    def __init__(self, pages_path: Path):
+    def __init__(self, pages_path: Path, *, rewrite_inbound_links: bool = True):
+        """FrontmatterWriter.
+
+        Args:
+            pages_path: pages 루트 경로.
+            rewrite_inbound_links: 파일을 카테고리 폴더로 이동시킬 때, 다른 파일
+                본문에 박힌 ``[[옛 경로]]`` / ``[[옛 stem]]`` 형태의 wikilink 를
+                새 위치로 일괄 보정한다. 비활성하면 분류기가 옮긴 파일을 가리키던
+                기존 링크가 모두 깨진 상태로 누적되어, ``wiki_get_backlinks`` /
+                ``find_orphans`` 의 신호 대비 노이즈를 키운다.
+        """
         self._pages = Path(pages_path)
+        self._rewrite_inbound = bool(rewrite_inbound_links)
 
     def apply(
         self,
@@ -137,6 +280,10 @@ class FrontmatterWriter:
         if not meta_after.get("category"):
             meta_after["category"] = decision.category
 
+        # subcategory 도 사용자 값 우선 (의도적으로 비웠을 수 있으므로 key 존재 여부로 판단).
+        if decision.subcategory and "subcategory" not in meta_after:
+            meta_after["subcategory"] = decision.subcategory
+
         existing_tags = list(meta_after.get("tags") or [])
         merged_tags = _merge_tags(existing_tags, list(decision.tags))
         if merged_tags != existing_tags:
@@ -151,7 +298,11 @@ class FrontmatterWriter:
 
         target_rel = rel_path
         if move_into_category:
-            tentative = _decide_target_path(rel_path, str(meta_after["category"]))
+            sub = meta_after.get("subcategory")
+            sub_str = str(sub).strip() if isinstance(sub, str) and sub else None
+            tentative = _decide_target_path(
+                rel_path, str(meta_after["category"]), sub_str
+            )
             if tentative != rel_path:
                 target_rel = _avoid_collision(self._pages, tentative)
 
@@ -163,12 +314,33 @@ class FrontmatterWriter:
                 source.unlink()
             except FileNotFoundError:
                 pass
+            # inbound wikilink 보정 — 옮긴 파일을 가리키던 다른 파일의 [[옛 경로]] /
+            # [[옛 stem]] 링크를 새 경로로 치환. 실패해도 본 작업은 성공 처리.
+            if self._rewrite_inbound:
+                try:
+                    rewritten = _rewrite_inbound_wikilinks(
+                        self._pages, rel_path, target_rel
+                    )
+                    if rewritten:
+                        logger.info(
+                            "rewrote inbound wikilinks in %d file(s) for %s -> %s",
+                            rewritten,
+                            rel_path,
+                            target_rel,
+                        )
+                except Exception:
+                    logger.exception(
+                        "rewrite_inbound_wikilinks failed for %s -> %s (continuing)",
+                        rel_path,
+                        target_rel,
+                    )
 
         logger.info(
-            "frontmatter applied: %s -> %s (category=%s, confidence=%.2f)",
+            "frontmatter applied: %s -> %s (category=%s, subcategory=%s, confidence=%.2f)",
             rel_path,
             target_rel,
             meta_after.get("category"),
+            meta_after.get("subcategory") or "-",
             decision.confidence,
         )
 

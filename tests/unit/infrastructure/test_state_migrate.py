@@ -17,6 +17,7 @@ from wiki_search_mcp.infrastructure.daemon.paths import _hash_wiki_path, state_d
 from wiki_search_mcp.infrastructure.daemon.state_migrate import (
     auto_migrate_if_safe,
     find_stale_candidates,
+    migrate_from,
 )
 
 
@@ -153,3 +154,72 @@ class TestAutoMigrateIfSafe:
         new_wiki.mkdir()
 
         assert auto_migrate_if_safe(new_wiki) is None
+
+
+class TestMigrateFrom:
+    """수동 마이그레이션 — auto 가 ambiguous 로 보류된 경우의 fallback."""
+
+    def test_migrates_from_explicit_source(self, tmp_path: Path) -> None:
+        new_wiki = tmp_path / "new_vault"
+        new_wiki.mkdir()
+        old_wiki_a = tmp_path / "old_a"
+        old_wiki_b = tmp_path / "old_b"
+        src_a = _seed_old_state(_wsm_root(tmp_path), old_wiki_a, applied=5)
+        _seed_old_state(_wsm_root(tmp_path), old_wiki_b, applied=9)
+
+        # 후보 2개 → auto 는 보류
+        assert auto_migrate_if_safe(new_wiki) is None
+
+        # 수동으로 a 를 지정
+        result = migrate_from(src_a, new_wiki)
+        assert result.applied_count == 5
+        cur = state_dir(new_wiki)
+        assert (cur / "applied.jsonl").exists()
+
+    def test_refuses_when_current_has_data(self, tmp_path: Path) -> None:
+        new_wiki = tmp_path / "new_vault"
+        new_wiki.mkdir()
+        cur = state_dir(new_wiki)
+        (cur / "applied.jsonl").write_text(json.dumps({"existing": 1}) + "\n", encoding="utf-8")
+        src = _seed_old_state(_wsm_root(tmp_path), tmp_path / "old", applied=3)
+
+        with pytest.raises(FileExistsError):
+            migrate_from(src, new_wiki)
+
+    def test_overwrite_flag_forces(self, tmp_path: Path) -> None:
+        new_wiki = tmp_path / "new_vault"
+        new_wiki.mkdir()
+        cur = state_dir(new_wiki)
+        (cur / "applied.jsonl").write_text(json.dumps({"existing": 1}) + "\n", encoding="utf-8")
+        src = _seed_old_state(_wsm_root(tmp_path), tmp_path / "old", applied=3)
+
+        migrate_from(src, new_wiki, overwrite=True)
+        # 옛 데이터(3줄)로 덮어쓰여야 함
+        lines = [l for l in (cur / "applied.jsonl").read_text().splitlines() if l.strip()]
+        assert len(lines) == 3
+
+    def test_accepts_status_json_path_and_resolves_to_dir(self, tmp_path: Path) -> None:
+        new_wiki = tmp_path / "new_vault"
+        new_wiki.mkdir()
+        src = _seed_old_state(_wsm_root(tmp_path), tmp_path / "old", applied=4)
+
+        # 사용자가 daemon_status.json 파일 경로를 넘겨도 부모를 source 로 간주.
+        result = migrate_from(src / "daemon_status.json", new_wiki)
+        assert result.applied_count == 4
+
+    def test_raises_when_source_is_current_dir(self, tmp_path: Path) -> None:
+        new_wiki = tmp_path / "new_vault"
+        new_wiki.mkdir()
+        cur = state_dir(new_wiki)
+
+        with pytest.raises(FileNotFoundError):
+            migrate_from(cur, new_wiki)
+
+    def test_raises_when_no_migratable_files(self, tmp_path: Path) -> None:
+        new_wiki = tmp_path / "new_vault"
+        new_wiki.mkdir()
+        empty = tmp_path / "empty_state"
+        empty.mkdir()
+
+        with pytest.raises(FileNotFoundError):
+            migrate_from(empty, new_wiki)

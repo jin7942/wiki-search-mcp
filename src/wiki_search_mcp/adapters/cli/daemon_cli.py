@@ -175,8 +175,16 @@ def _passthrough_args(kw: dict) -> list[str]:
         args += ["--rate-per-day", str(kw["rate_per_day"])]
     if kw.get("debounce") not in (None, 2.0):
         args += ["--debounce", str(kw["debounce"])]
+    if kw.get("quiescence_seconds") not in (None, 60.0):
+        args += ["--quiescence-seconds", str(kw["quiescence_seconds"])]
+    if kw.get("min_body_chars") not in (None, 200):
+        args += ["--min-body-chars", str(kw["min_body_chars"])]
+    if kw.get("rescan_interval_seconds") not in (None, 300.0):
+        args += ["--rescan-interval-seconds", str(kw["rescan_interval_seconds"])]
     if kw.get("auto_move") is False:
         args += ["--no-auto-move"]
+    if kw.get("rewrite_inbound_links") is False:
+        args += ["--no-rewrite-inbound-links"]
     if kw.get("log_level") and kw["log_level"] != "INFO":
         args += ["--log-level", str(kw["log_level"])]
     return args
@@ -192,7 +200,11 @@ def _build_options(wiki: Path, kw: dict) -> DaemonOptions:
         rate_per_hour=kw["rate_per_hour"],
         rate_per_day=kw["rate_per_day"],
         debounce=kw["debounce"],
+        quiescence_seconds=kw["quiescence_seconds"],
+        min_body_chars=kw["min_body_chars"],
+        rescan_interval_seconds=kw["rescan_interval_seconds"],
         auto_move=kw["auto_move"],
+        rewrite_inbound_links=kw["rewrite_inbound_links"],
         log_level=kw["log_level"],
     )
 
@@ -264,7 +276,34 @@ def daemon() -> None:
 @click.option("--rate-per-hour", type=int, default=100, show_default=True)
 @click.option("--rate-per-day", type=int, default=500, show_default=True)
 @click.option("--debounce", type=float, default=2.0, show_default=True)
+@click.option(
+    "--quiescence-seconds",
+    type=float,
+    default=60.0,
+    show_default=True,
+    help="파일이 정적 상태로 머물러야 분류 진입을 허용하는 최소 시간 (작성 중 인터럽트 방지)",
+)
+@click.option(
+    "--min-body-chars",
+    type=int,
+    default=200,
+    show_default=True,
+    help="분류 진입을 허용하는 본문 최소 길이 (미만이면 pending)",
+)
+@click.option(
+    "--rescan-interval-seconds",
+    type=float,
+    default=300.0,
+    show_default=True,
+    help="외부 FS 이벤트 없이도 daemon이 스스로 rescan하는 주기 (0이면 비활성)",
+)
 @click.option("--auto-move/--no-auto-move", default=True, show_default=True)
+@click.option(
+    "--rewrite-inbound-links/--no-rewrite-inbound-links",
+    default=True,
+    show_default=True,
+    help="파일 이동 시 다른 파일 본문의 [[옛 경로]] wikilink를 새 경로로 보정",
+)
 @click.option("--foreground", is_flag=True, help="현재 터미널에서 실행 (디버깅용)")
 @click.option(
     "--log-level",
@@ -419,6 +458,40 @@ def logs(wiki_path: str | None, lines: int, follow: bool) -> None:
             time.sleep(0.5)
     except KeyboardInterrupt:
         return
+
+
+@daemon.command("migrate-state")
+@click.argument("source", type=click.Path(exists=True))
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="현재 state 에 데이터가 있어도 덮어쓴다 (위험)",
+)
+def migrate_state(source: str, wiki_path: str | None, overwrite: bool) -> None:
+    """수동으로 옛 daemon state 디렉토리를 현재 wiki 로 이전합니다.
+
+    SOURCE 는 옛 state 디렉토리 (또는 그 안의 ``daemon_status.json``) 경로.
+    자동 마이그레이션이 ambiguous (옛 후보 2개 이상) 로 보류된 경우의 fallback.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    from wiki_search_mcp.infrastructure.daemon.state_migrate import migrate_from
+
+    wiki = _resolve_wiki_path(wiki_path)
+    src = Path(source).expanduser().resolve()
+    try:
+        result = migrate_from(src, wiki, overwrite=overwrite)
+    except FileExistsError as e:
+        raise click.ClickException(str(e)) from e
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e)) from e
+
+    click.echo(
+        f"옛 작업 이력을 이전했습니다 "
+        f"(applied={result.applied_count}, pending={result.pending_count}, "
+        f"이전 경로={result.recorded_wiki_path})."
+    )
 
 
 @daemon.command("rollback")

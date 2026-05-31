@@ -194,6 +194,40 @@ class CategoryService:
 
         return suggestions
 
+    def list_subfolders(self) -> dict[str, tuple[str, ...]]:
+        """각 활성 카테고리 1-depth 서브폴더 이름 목록.
+
+        분류기가 평탄(``<category>/<basename>``) 배치 대신 적절한 프로젝트 폴더로
+        라우팅할 수 있도록 LLM 프롬프트의 힌트로 사용한다. staging/ignore 폴더는 제외.
+
+        Returns:
+            ``{category: (sub1, sub2, ...)}`` — 카테고리에 서브폴더가 없으면 키 자체가
+            없을 수 있다. 정렬은 카테고리 사전순, 서브폴더 사전순.
+        """
+        result: dict[str, tuple[str, ...]] = {}
+        listing = self.list_categories()
+        for cat in listing.categories:
+            cat_dir = self._pages_path / cat
+            if not cat_dir.is_dir():
+                continue
+            subs: list[str] = []
+            try:
+                for entry in cat_dir.iterdir():
+                    if not entry.is_dir():
+                        continue
+                    if self._ignore_matcher.should_ignore(entry):
+                        continue
+                    if is_staging_folder(entry.name):
+                        continue
+                    subs.append(entry.name)
+            except OSError as e:
+                logger.debug("list_subfolders(%s) failed: %s", cat, e)
+                continue
+            if subs:
+                subs.sort()
+                result[cat] = tuple(subs)
+        return result
+
     def invalidate(self) -> None:
         """캐시 무효화. ``wiki_reindex`` 후 호출."""
         self._cached_listing = None

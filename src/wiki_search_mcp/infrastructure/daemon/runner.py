@@ -43,7 +43,10 @@ from wiki_search_mcp.infrastructure.frontmatter.writer import FrontmatterWriter
 from wiki_search_mcp.infrastructure.indexing import WikiIndexer
 from wiki_search_mcp.infrastructure.jsonl.log import JsonlLog
 from wiki_search_mcp.infrastructure.watcher import WikiWatcher
-from wiki_search_mcp.services.classifier_service import ClassifierService
+from wiki_search_mcp.services.classifier_service import (
+    ClassifierService,
+    ClassifierSkipped,
+)
 from wiki_search_mcp.services.llm.claude_code_provider import ClaudeCodeProvider
 
 logger = logging.getLogger(__name__)
@@ -81,7 +84,10 @@ class DaemonRunner:
             model_name=opts.embedding_model,
             ignore_patterns=opts.ignore_patterns,
         )
-        self._writer = FrontmatterWriter(self._container.pages_path)
+        self._writer = FrontmatterWriter(
+            self._container.pages_path,
+            rewrite_inbound_links=opts.rewrite_inbound_links,
+        )
 
         provider = (
             opts.provider_factory()
@@ -94,6 +100,7 @@ class DaemonRunner:
             category_service=self._container.category_service,
             provider=provider,
             pages_path=self._container.pages_path,
+            min_body_chars=opts.min_body_chars,
         )
 
         self._rate = SlidingWindowRateLimit(
@@ -172,16 +179,45 @@ class DaemonRunner:
         # Worker pool
         workers = [asyncio.create_task(self._worker(i)) for i in range(self._opts.concurrency)]
 
+        # 주기 self-rescan — 외부 FS 이벤트가 안 와도 cooldown 만료 항목이 다시
+        # 큐잉되도록. ``rescan_interval_seconds <= 0`` 이면 비활성.
+        periodic: asyncio.Task | None = None
+        if self._opts.rescan_interval_seconds > 0:
+            periodic = asyncio.create_task(self._periodic_rescan())
+
         try:
             await self._stop.wait()
         finally:
             logger.info("daemon stopping...")
+            if periodic is not None:
+                periodic.cancel()
             for w in workers:
                 w.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
+            tasks = [*workers]
+            if periodic is not None:
+                tasks.append(periodic)
+            await asyncio.gather(*tasks, return_exceptions=True)
             watcher.stop()
             self._status.update(state="stopped", stopped_at=_utc_now())
             logger.info("daemon stopped.")
+
+    async def _periodic_rescan(self) -> None:
+        """``rescan_interval_seconds`` 마다 ``_rescan()`` 호출.
+
+        외부 FS 이벤트가 더 이상 안 들어와도 cooldown 만료 항목이 다시 큐에 들어가도록
+        주기적으로 깨운다. ``_stop`` 신호가 오면 즉시 종료.
+        """
+        interval = self._opts.rescan_interval_seconds
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._rescan()
+            except Exception:
+                logger.exception("periodic rescan failed")
 
     # ---------------------------------------------------------------- watcher
     def _on_watch_event(self) -> None:
@@ -276,9 +312,36 @@ class DaemonRunner:
             mtime_before = full.stat().st_mtime
         except FileNotFoundError:
             return
+
+        # Quiescence guard — 사용자가 막 손댄 파일에 분류가 끼어드는 것을 차단.
+        # ``now - mtime`` 이 임계 미만이면 짧은 cooldown 후 다음 rescan 에서 재시도.
+        # 5분 정도로 cooldown 을 잡으면 quiescence 60s 환경에서도 자연스럽게 재시도된다.
+        quiescence = self._opts.quiescence_seconds
+        if quiescence > 0:
+            age = time.time() - mtime_before
+            if age < quiescence:
+                self._cooldown[rel] = time.monotonic() + max(quiescence - age, 5.0)
+                logger.debug(
+                    "skip %s: age=%.1fs < quiescence=%.1fs", rel, age, quiescence
+                )
+                return
+
         try:
             decision = await self._classifier.classify(rel)
         except DocumentNotFoundError:
+            return
+        except ClassifierSkipped as e:
+            # 분류 가드(본문 너무 짧음 / 사용자 잠금)에 걸린 경우.
+            # 오류가 아니므로 error_count 는 그대로 두고, pending.jsonl 에 사유만 남긴다.
+            self._pending.append(
+                {
+                    "path": rel,
+                    "reason": e.reason,
+                    "recorded_at": _utc_now(),
+                }
+            )
+            # 같은 파일이 다음 rescan 마다 즉시 재진입하지 않도록 짧은 cooldown.
+            self._cooldown[rel] = time.monotonic() + max(quiescence, 30.0)
             return
 
         # 분류 도중 사용자가 파일을 수정한 경우 → 적용 안 함

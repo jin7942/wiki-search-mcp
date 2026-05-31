@@ -7,7 +7,7 @@ Daemon이 분류 호출을 위해 사용하는 추상화. 현재 구현체는
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -20,12 +20,17 @@ class ClassificationRequest:
         body_preview: 본문 앞부분 (토큰 절약용 4000자 권장)
         suggestion_hints: ClassificationSuggestion.to_dict() (휴리스틱 힌트로 prompt에 주입)
         active_categories: 사용자 wiki에 존재하는 카테고리 목록 (LLM이 이 중에서 선택)
+        subfolders_by_category: 각 카테고리의 1-depth 서브폴더 이름 맵 (옵션).
+            예: ``{"projects": ("myproj", "kbs"), "personal": ("budget-app",)}``.
+            LLM 이 평탄 배치 대신 적절한 프로젝트 폴더로 라우팅하도록 힌트로 전달한다.
+            비어 있으면 LLM 은 subcategory 없이 1-depth 로만 응답해야 한다.
     """
 
     path: str
     body_preview: str
     suggestion_hints: dict[str, Any]
     active_categories: tuple[str, ...]
+    subfolders_by_category: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @runtime_checkable

@@ -531,6 +531,8 @@ class ClassificationDecision:
     Attributes:
         path: 대상 파일 상대 경로
         category: 결정된 카테고리
+        subcategory: 결정된 서브카테고리(예: 프로젝트명). None 이면 1-depth.
+            제공된 경우 파일은 ``<category>/<subcategory>/<basename>`` 으로 이동한다.
         tags: 결정된 태그 (최대 5개 권장)
         confidence: 0.0-1.0. ``daemon.confidence_threshold`` 이상이면 자동 적용
         reasoning: LLM의 설명 (디버깅/로그용, 250자 내외 권장)
@@ -545,11 +547,13 @@ class ClassificationDecision:
     reasoning: str
     provider: str
     raw_response: str = ""
+    subcategory: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "category": self.category,
+            "subcategory": self.subcategory,
             "tags": list(self.tags),
             "confidence": self.confidence,
             "reasoning": self.reasoning,

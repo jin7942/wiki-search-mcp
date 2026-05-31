@@ -3,6 +3,84 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.4.0] - 2026-05-31
+
+0.3.0 운영 보고서의 P0/P1/P2 일괄 해결. inbox 작성 중 분류 인터럽트(P0), 카테고리
+1-depth 평탄 배치(P1), 파일 이동 후 깨지는 wikilink 누적(P1), pending 큐 정체(P2),
+자동 state 마이그레이션이 ambiguous 로 보류된 경우의 수동 fallback(P3).
+
+### Added
+
+- **분류 진입 가드 — quiescence + min_body_chars + draft frontmatter (P0)**: inbox 에
+  파일을 작성하다 잠깐 멈춘 사이 분류기가 미완성 본문을 LLM 에 보내 카테고리를
+  결정해 버리던 문제. 세 겹 가드 추가:
+  - ``DaemonOptions.quiescence_seconds`` (기본 60): 파일 ``mtime`` 이 임계 미만이면
+    LLM 호출 없이 짧은 cooldown 후 다음 rescan 에서 재시도.
+  - ``DaemonOptions.min_body_chars`` (기본 200): 본문(frontmatter 제외) ``strip()``
+    길이가 임계 미만이면 ``ClassifierSkipped("too_short")`` 로 pending 처리.
+  - frontmatter ``draft: true`` 또는 ``locked: true``: 사용자가 명시적으로 표시한
+    초안은 분류 대상에서 제외 (``"true"``/``"yes"`` 문자열도 인정).
+  - 각 가드는 단독 비활성 가능 (0 또는 비표시).
+- **서브카테고리 자동 라우팅 (P1)**: 기존엔 분류기가 항상 ``<category>/<basename>``
+  으로 평탄 배치해 사용자 정리분(``projects/한수원/...``) 과 자동분(``projects/...``)
+  이 두 층으로 갈렸음. 변경:
+  - ``ClassificationDecision`` 에 ``subcategory: str | None`` 추가.
+  - ``CategoryService.list_subfolders()`` 가 각 카테고리의 1-depth 활성 서브폴더
+    목록을 반환 (staging/ignore 제외).
+  - LLM 프롬프트가 ``subfolders_by_category`` 화이트리스트를 받아 적절한 서브폴더로
+    라우팅. 화이트리스트에 없는 임의 폴더 제안은 파서에서 ``None`` 으로 강등.
+  - frontmatter 에도 ``subcategory`` 키 기록 (사용자 값 우선).
+  - 파일은 ``<category>/<subcategory>/<basename>`` 으로 이동.
+- **파일 이동 시 inbound wikilink 자동 보정 (P1)**: 분류기가 ``inbox/foo.md`` →
+  ``infra/foo.md`` 로 옮길 때 다른 파일 본문에 박힌 ``[[inbox/foo]]`` / ``[[foo]]``
+  같은 wikilink 가 깨진 상태로 누적되던 문제. ``FrontmatterWriter.rewrite_inbound_links``
+  옵션 (기본 ``True``) 으로 자동 치환. 안전 정책:
+  - 전체 경로 표기는 즉시 치환.
+  - basename-only 링크는 vault 전역에 동일 basename 이 유일할 때만 치환 (모호하면 보존).
+  - ``#anchor`` / ``|label`` 보존.
+  - 옮긴 파일 본인은 건드리지 않음.
+- **daemon 주기 self-rescan (P2)**: ``rescan_interval_seconds`` (기본 300) 마다 외부
+  FS 이벤트 없이도 ``_rescan()`` 발화. cooldown 만료 항목이 영원히 안 깨어나던 문제
+  (``rate_limited`` / ``classifier_error`` 후 잔류 pending) 해결. 0 이하로 두면 비활성.
+- **``daemon migrate-state`` CLI (P3)**: 자동 state 마이그레이션이 후보 2개 이상이라
+  ambiguous 로 보류된 경우의 수동 fallback. ``wiki-search-mcp daemon migrate-state
+  <옛 state 디렉토리> [WIKI_PATH] [--overwrite]``. ``daemon_status.json`` 파일 경로를
+  넘겨도 부모를 source 로 인식.
+
+### Changed
+
+- ``ClassificationRequest`` 에 ``subfolders_by_category: dict[str, tuple[str, ...]]``
+  필드 추가 (기본값 빈 dict — 후방 호환).
+- CLI ``daemon start`` 에 ``--quiescence-seconds`` / ``--min-body-chars`` /
+  ``--rescan-interval-seconds`` / ``--rewrite-inbound-links`` / ``--no-rewrite-inbound-links``
+  옵션 노출. 백그라운드 spawn 시에도 그대로 전달.
+
+### Tests
+
+- ``tests/unit/services/test_classifier_guards.py`` 신설: ``too_short`` / ``user_locked``
+  reason, ``min_body_chars=0`` 비활성, ``draft: false`` 통과, 문자열/불리언 모두 인정.
+- ``tests/unit/infrastructure/test_writer_subcategory_and_links.py`` 신설:
+  서브카테고리 이동, 평탄 배치 회귀 보존, 전체 경로/basename 보정, 모호 시 보존,
+  anchor/label 보존, rewrite 비활성, 자기 파일 보존.
+- ``tests/unit/services/test_category_list_subfolders.py`` 신설: 1-depth 만, staging
+  제외, 파일 제외, 재귀 안 함, 사전순.
+- ``tests/unit/services/llm/test_prompt_subcategory.py`` 신설: prompt 에 subfolders
+  포함, 파서가 화이트리스트 검증, 알 수 없는 값은 ``None`` 강등, 누락/null 후방 호환.
+- ``tests/unit/infrastructure/test_daemon_quiescence.py`` 신설: 최근 수정 파일은 LLM
+  호출 없이 cooldown, 과거 mtime 은 통과, periodic rescan 외부 이벤트 없이 발화.
+- ``tests/unit/infrastructure/test_state_migrate.py`` 에 ``TestMigrateFrom`` 추가: 수동
+  source 지정 / 현재 데이터 있으면 거부 / overwrite 강제 / status.json 경로 허용 /
+  source==current 거부 / 옮길 파일 전무 시 raise.
+- 기존 회귀 테스트(``test_classifier_service::test_classify_uses_suggestion_and_categories``,
+  ``test_daemon_reindex``, ``test_daemon_lifecycle``) 는 신규 가드와 의도 충돌 부분만
+  ``min_body_chars=0`` / ``quiescence_seconds=0`` 으로 비활성해 원 의도 보존.
+
+### Notes
+
+- 그래프를 "온톨로지"로 만드는 작업(보고서 #3b)은 v0.4.0 범위 외 — 별도 RFC.
+- MCP serve 멀티 클라이언트 share(보고서 #4.2)는 stdio transport 한계로 본 릴리스
+  범위 외.
+
 ## [0.3.0] - 2026-05-27
 
 사용자 환경 진단 보고서(0.2.6)의 부차 결함 P2/P3 및 신규 문서 inbox 우회 문제를 일괄 해결.

@@ -69,6 +69,7 @@ async def test_classify_uses_suggestion_and_categories(tmp_path: Path) -> None:
         category_service=cats,
         provider=provider,
         pages_path=pages,
+        min_body_chars=0,  # 본문 길이 가드 비활성 — 본 테스트는 suggest/category 흐름만 검증
     )
     out = await svc.classify("inbox/x.md")
     assert out.category == "infra"

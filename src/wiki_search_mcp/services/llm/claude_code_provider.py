@@ -117,6 +117,7 @@ class ClaudeCodeProvider:
             raw=text,
             provider=f"{self.name}:{self._model}",
             active_categories=req.active_categories,
+            subfolders_by_category=dict(req.subfolders_by_category or {}),
         )
 
     async def healthcheck(self) -> None:
