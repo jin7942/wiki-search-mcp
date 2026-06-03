@@ -134,3 +134,62 @@ def test_start_foreground_invokes_runner(tmp_path: Path) -> None:
     opts = fake_class.call_args.args[0]
     assert opts.rate_per_minute == 10
     fake_runner.start.assert_called_once()
+
+
+def test_daemon_help_lists_reclassify() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["daemon", "--help"])
+    assert result.exit_code == 0
+    assert "reclassify" in result.output
+
+
+def test_reclassify_refuses_when_daemon_alive(tmp_path: Path) -> None:
+    """daemon 실행 중이면 --force 없이는 거부."""
+    wiki = tmp_path / "vault"
+    wiki.mkdir()
+    runner = CliRunner()
+    with patch(
+        "wiki_search_mcp.infrastructure.daemon.pidfile.PidLock.is_alive",
+        return_value=(True, 4928),
+    ):
+        result = runner.invoke(main, ["daemon", "reclassify", str(wiki)])
+    assert result.exit_code != 0
+    assert "실행 중" in result.output
+
+
+def test_reclassify_dry_run_outputs_json(tmp_path: Path) -> None:
+    """--dry-run 실행 시 ReclassificationService 결과를 JSON 으로 출력."""
+    wiki = tmp_path / "vault"
+    wiki.mkdir()
+    runner = CliRunner()
+
+    fake_service = MagicMock()
+
+    async def _fake_reclassify(**kw):
+        return [{"path": "projects/a.md", "status": "would_move", "path_after": "projects/KT/a.md"}]
+
+    fake_service.reclassify.side_effect = _fake_reclassify
+
+    with patch(
+        "wiki_search_mcp.adapters.cli.daemon_cli._check_claude_cli_or_die"
+    ), patch(
+        "wiki_search_mcp.adapters.cli.daemon_cli._check_claude_logged_in_or_hint"
+    ), patch(
+        "wiki_search_mcp.adapters.mcp.container.ServiceContainer"
+    ), patch(
+        "wiki_search_mcp.services.llm.claude_code_provider.ClaudeCodeProvider"
+    ), patch(
+        "wiki_search_mcp.services.classifier_service.ClassifierService"
+    ), patch(
+        "wiki_search_mcp.infrastructure.frontmatter.writer.FrontmatterWriter"
+    ), patch(
+        "wiki_search_mcp.services.reclassification_service.ReclassificationService",
+        return_value=fake_service,
+    ):
+        result = runner.invoke(main, ["daemon", "reclassify", str(wiki), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["dry_run"] is True
+    assert payload["moved"] == 1
+    assert payload["results"][0]["path_after"] == "projects/KT/a.md"

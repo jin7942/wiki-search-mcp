@@ -1,6 +1,6 @@
 """``wiki-search-mcp daemon ...`` 서브커맨드.
 
-start / stop / status / logs / rollback 다섯 명령을 제공한다.
+start / stop / status / logs / rollback / reclassify 명령을 제공한다.
 실제 daemon 로직은 ``infrastructure.daemon.runner.DaemonRunner``에 있고,
 이 모듈은 그 진입점/라이프사이클/표시만 책임진다.
 """
@@ -520,6 +520,98 @@ def rollback(wiki_path: str | None, last_n: int, dry_run: bool, force: bool) -> 
     service = RollbackService(applied_log=applied_log, pages_path=container.pages_path)
     results = service.rollback_last(last_n, dry_run=dry_run)
     click.echo(json.dumps({"dry_run": dry_run, "count": len(results), "results": results}, ensure_ascii=False, indent=2))
+
+
+@daemon.command("reclassify")
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
+@click.option("--dry-run", is_flag=True, help="실제 이동 없이 어디로 옮길지만 표시")
+@click.option("--limit", type=int, default=100, show_default=True, help="처리할 파일 최대 수 (LLM 비용 상한)")
+@click.option("--category", "category_filter", default=None, help="특정 카테고리만 대상")
+@click.option("--confidence-threshold", type=float, default=0.70, show_default=True)
+@click.option("--llm-model", default="haiku", show_default=True, help="Claude 모델 alias 또는 풀 ID")
+@click.option("--force", is_flag=True, help="daemon이 실행 중이어도 진행")
+def reclassify(
+    wiki_path: str | None,
+    dry_run: bool,
+    limit: int,
+    category_filter: str | None,
+    confidence_threshold: float,
+    llm_model: str,
+    force: bool,
+) -> None:
+    """카테고리 루트에 평탄하게 남은 옛 파일을 서브폴더로 재배치합니다.
+
+    daemon 자동 분류는 inbox 신규 파일만 다루므로, 이미 카테고리 폴더에 자리잡은
+    옛 파일은 서브폴더 라우팅이 적용되지 않습니다. 이 명령은 그런 평탄 파일 중
+    "그 카테고리에 서브폴더 후보가 있는" 것만 골라 LLM으로 재분류합니다.
+
+    새 서브폴더는 만들지 않습니다 (분류기가 기존 서브폴더 화이트리스트에서만 선택).
+    먼저 ``--dry-run``으로 이동 계획을 확인한 뒤 실제 적용을 권장합니다.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    wiki = _resolve_wiki_path(wiki_path)
+    alive, pid = PidLock.is_alive(pid_file(wiki))
+    if alive and not force:
+        raise click.ClickException(
+            f"daemon이 실행 중입니다 (pid={pid}). 먼저 stop하거나 --force 사용."
+        )
+
+    # LLM 호출이 필요하므로 (dry-run 포함) claude CLI / 로그인 검증.
+    _check_claude_cli_or_die()
+    _check_claude_logged_in_or_hint()
+
+    import asyncio
+
+    from wiki_search_mcp.adapters.mcp.container import ServiceContainer
+    from wiki_search_mcp.infrastructure.frontmatter.writer import FrontmatterWriter
+    from wiki_search_mcp.infrastructure.jsonl.log import JsonlLog
+    from wiki_search_mcp.services.classifier_service import ClassifierService
+    from wiki_search_mcp.services.llm.claude_code_provider import ClaudeCodeProvider
+    from wiki_search_mcp.services.reclassification_service import (
+        ReclassificationService,
+    )
+
+    container = ServiceContainer(str(wiki))
+    provider = ClaudeCodeProvider(model=llm_model)
+    classifier = ClassifierService(
+        classification_service=container.classification_service,
+        category_service=container.category_service,
+        provider=provider,
+        pages_path=container.pages_path,
+    )
+    writer = FrontmatterWriter(container.pages_path)
+    applied_log = JsonlLog(applied_jsonl(wiki))
+    service = ReclassificationService(
+        classifier=classifier,
+        category_service=container.category_service,
+        writer=writer,
+        applied_log=applied_log,
+        pages_path=container.pages_path,
+        ignore_matcher=container.ignore_matcher,
+    )
+
+    results = asyncio.run(
+        service.reclassify(
+            dry_run=dry_run,
+            limit=limit,
+            category_filter=category_filter,
+            confidence_threshold=confidence_threshold,
+        )
+    )
+    moved = sum(1 for r in results if r["status"] in ("moved", "would_move"))
+    click.echo(
+        json.dumps(
+            {
+                "dry_run": dry_run,
+                "count": len(results),
+                "moved": moved,
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @daemon.command("install")

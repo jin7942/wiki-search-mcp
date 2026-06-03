@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import atexit
 import logging
-import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,8 +102,11 @@ _options: ServerOptions | None = None
 _container: ServiceContainer | None = None
 _indexer: WikiIndexer | None = None
 _watcher: WikiWatcher | None = None
-# serve 단일 인스턴스 락. 프로세스 생명주기 동안 보유하고 atexit에서 release.
+# watcher 소유권 락. 같은 vault 에 여러 serve 가 떠도 watcher(자동 reindex)는
+# 락을 잡은 한 인스턴스만 돌린다. 락을 못 잡은 serve 는 검색 전용으로 계속 동작.
+# 프로세스 생명주기 동안 보유하고 atexit 에서 release.
 _serve_lock = None  # PidLock | None
+_owns_watcher = False  # 이 serve 인스턴스가 watcher 소유권을 가졌는지
 
 
 def _require_options() -> ServerOptions:
@@ -668,18 +670,22 @@ def wiki_suggest_classification(path: str) -> str:
 # =============================================================================
 
 
-def _acquire_serve_lock(wiki_path: Path) -> bool:
-    """serve 단일 인스턴스 락 획득.
+def _acquire_watcher_lock(wiki_path: Path) -> bool:
+    """watcher 소유권 락 획득 (best-effort).
 
-    같은 vault에 대해 이미 serve 인스턴스가 실행 중이면 중복 기동을 막는다.
-    Claude Desktop이 재시작 등으로 serve를 중복 spawn하면 file watcher가 같은
-    파일을 두 번 보고 reindex가 중복 트리거되어 LanceDB 매니페스트 race가 날 수 있다.
+    같은 vault에 여러 serve(예: Claude Code + Claude Desktop)가 동시에 떠도
+    watcher(자동 reindex)는 한 인스턴스만 돌리도록 한다. 락을 못 잡은 serve는
+    watcher 없이 검색 전용으로 계속 동작하며 종료하지 않는다.
+
+    reindex 자체의 동시성 안전은 indexer 의 cross-process reindex flock 이
+    보장하므로, 이 락은 정확성이 아니라 "중복 watcher → 중복 reindex" 비효율을
+    줄이기 위한 최적화다.
 
     Args:
         wiki_path: wiki 루트
 
     Returns:
-        락 획득 성공 시 True. 이미 실행 중이면 False.
+        락 획득 성공 시 True (watcher 소유). 이미 다른 serve가 소유 중이면 False.
     """
     global _serve_lock
     from wiki_search_mcp.infrastructure.daemon.paths import (
@@ -693,9 +699,9 @@ def _acquire_serve_lock(wiki_path: Path) -> bool:
         lock.acquire()
     except DaemonError as e:
         existing = e.context.details.get("pid") if e.context else None
-        logger.error(
-            "another wiki-search serve is already running for this vault "
-            "(pid=%s); exiting to avoid duplicate watchers",
+        logger.info(
+            "another wiki-search serve owns the watcher for this vault "
+            "(pid=%s); running in search-only mode (no watcher)",
             existing,
         )
         return False
@@ -710,7 +716,7 @@ def main(options: ServerOptions) -> None:
     Args:
         options: CLI에서 빌드한 런타임 옵션 (wiki_path 필수)
     """
-    global _options
+    global _options, _owns_watcher
 
     # 옵션 보관 (다른 함수들이 _require_options()로 참조)
     _options = options
@@ -718,18 +724,20 @@ def main(options: ServerOptions) -> None:
     # 로깅 초기화 (CLI 옵션 기반)
     setup_logging(level=options.log_level, log_file=options.log_file)
 
-    # 단일 인스턴스 락 — 같은 vault 중복 serve 방지
-    if not _acquire_serve_lock(options.wiki_path):
-        sys.exit(0)
+    # watcher 소유권 락 (best-effort). 같은 vault 에 다른 serve 가 이미 watcher 를
+    # 돌리고 있으면 이 인스턴스는 검색 전용으로 동작한다. 종료하지 않으므로
+    # 여러 MCP 클라이언트가 같은 vault 를 동시에 쓸 수 있다.
+    _owns_watcher = _acquire_watcher_lock(options.wiki_path)
 
-    # 파일 감시 시작
-    start_watcher()
+    if _owns_watcher:
+        # 파일 감시 시작 (소유 인스턴스만)
+        start_watcher()
 
-    # 인덱스 비어있으면 백그라운드 자동 인덱싱 (첫 사용 UX 개선)
-    _bootstrap_index_if_empty()
+        # 인덱스 비어있으면 백그라운드 자동 인덱싱 (첫 사용 UX 개선)
+        _bootstrap_index_if_empty()
 
-    # 종료 시 정리
-    atexit.register(stop_watcher)
+        # 종료 시 정리
+        atexit.register(stop_watcher)
 
     # MCP 서버 실행
     mcp.run()

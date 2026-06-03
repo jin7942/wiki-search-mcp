@@ -10,12 +10,64 @@ import fcntl
 import logging
 import os
 import signal
+import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from types import TracebackType
 
 from wiki_search_mcp.core.exceptions import DaemonError
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def cross_process_lock(
+    lock_path: Path, *, timeout: float = 30.0, poll_interval: float = 0.1
+) -> Iterator[bool]:
+    """여러 프로세스가 공유하는 임계구역 flock (blocking, timeout).
+
+    ``PidLock`` 과 달리 단일 인스턴스 표식이 아니라 reindex 같은 쓰기 구간을
+    프로세스 간에 직렬화하기 위한 락이다. 같은 ``lock_path`` 를 쓰는 다른
+    프로세스가 락을 쥐고 있으면 ``timeout`` 까지 대기하다가, 끝내 못 잡으면
+    ``False`` 를 yield 한다 (호출자가 skip 하거나 강행할지 결정).
+
+    Args:
+        lock_path: flock 대상 파일 경로 (vault 별 단일 경로여야 의미가 있다).
+        timeout: 락 획득 대기 최대 초.
+        poll_interval: non-blocking 재시도 간격(초).
+
+    Yields:
+        락을 획득했으면 ``True``, timeout 으로 실패했으면 ``False``.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    acquired = False
+    deadline = time.monotonic() + max(timeout, 0.0)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "cross_process_lock timeout after %.1fs: %s",
+                        timeout,
+                        lock_path,
+                    )
+                    break
+                time.sleep(poll_interval)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        else:
+            os.close(fd)
 
 
 def _read_pid(pid_path: Path) -> int | None:

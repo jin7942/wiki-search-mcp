@@ -19,6 +19,8 @@ from wiki_search_mcp.core.config import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODEL
 from wiki_search_mcp.core.logging import get_logger
 from wiki_search_mcp.core.types import ConfidenceDict, FrontmatterDict
 from wiki_search_mcp.core.utils import parse_frontmatter, resolve_pages_path, tokenize
+from wiki_search_mcp.infrastructure.daemon.paths import reindex_lock_file
+from wiki_search_mcp.infrastructure.daemon.pidfile import cross_process_lock
 from wiki_search_mcp.infrastructure.ignore import IgnoreMatcher
 from wiki_search_mcp.infrastructure.storage.lancedb_compat import has_table
 
@@ -52,6 +54,11 @@ class WikiIndexer:
             ignore_patterns: CLI ``--ignore``로 전달된 추가 무시 패턴
         """
         self.wiki_path = Path(wiki_path)
+
+        # reindex 파일 쓰기 구간을 프로세스 간에 직렬화하는 cross-process flock 경로.
+        # serve / daemon / CLI 가 같은 vault 에 동시에 reindex 해도 LanceDB 매니페스트
+        # race / JSON 부분 손상을 막는다. daemon paths 헬퍼와 같은 state_dir 를 쓴다.
+        self._reindex_lock_path = reindex_lock_file(self.wiki_path)
 
         # 런타임 설정 로드 (현재는 기본값 dataclass 반환)
         self.wiki_config = WikiConfig.load(self.wiki_path)
@@ -354,41 +361,55 @@ class WikiIndexer:
         for deleted_path in deleted_paths:
             del meta["files"][deleted_path]
 
-        # LanceDB 테이블 생성/갱신.
-        # ``drop_table`` + ``create_table``을 분리하면 다중 worker daemon에서
-        # race가 발생한다 (worker A가 drop한 직후 worker B가 list_tables를 보고
-        # 다시 create를 시도하다 ``Table 'wiki' already exists`` 충돌).
-        # lancedb가 제공하는 ``mode="overwrite"`` 단일 호출은 내부적으로 atomic하므로
-        # 명시적인 drop이 불필요하다.
-        if records:
-            self.db.create_table("wiki", records, mode="overwrite")
+        # 파일 쓰기 구간 — cross-process flock 으로 직렬화.
+        # serve / daemon / CLI 가 같은 vault 에 동시에 reindex 해도 LanceDB
+        # 매니페스트 race / JSON 부분 손상을 막는다. 임베딩 계산(위)은 느리지만
+        # 락 밖에 두어 임계구역을 파일 쓰기 4종으로 최소화한다.
+        with cross_process_lock(self._reindex_lock_path) as locked:
+            if not locked:
+                # timeout: 다른 프로세스가 장시간 reindex 중. 강행하면 race 위험이
+                # 있으나, 끝내 못 쓰면 인덱스가 영영 갱신 안 되므로 경고 후 진행.
+                logger.warning(
+                    "reindex lock timeout; proceeding without cross-process lock "
+                    "(another process may be reindexing): %s",
+                    self._reindex_lock_path,
+                )
 
-        # 그래프 저장
-        graph_path.write_text(
-            json.dumps(
-                {"nodes": graph_nodes, "edges": graph_edges},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+            # LanceDB 테이블 생성/갱신.
+            # ``drop_table`` + ``create_table``을 분리하면 다중 worker daemon에서
+            # race가 발생한다 (worker A가 drop한 직후 worker B가 list_tables를 보고
+            # 다시 create를 시도하다 ``Table 'wiki' already exists`` 충돌).
+            # lancedb가 제공하는 ``mode="overwrite"`` 단일 호출은 내부적으로 atomic하므로
+            # 명시적인 drop이 불필요하다.
+            if records:
+                self.db.create_table("wiki", records, mode="overwrite")
 
-        # BM25 인덱스 구축 및 저장
-        if records:
-            bm25_data = {
-                "tokens": [
-                    tokenize(f"{r['title']} {r['summary']}") for r in records
-                ],
-                "paths": [r["path"] for r in records],
-            }
-            bm25_path = self.db_path / "bm25_index.json"
-            bm25_path.write_text(
-                json.dumps(bm25_data, ensure_ascii=False), encoding="utf-8"
+            # 그래프 저장
+            graph_path.write_text(
+                json.dumps(
+                    {"nodes": graph_nodes, "edges": graph_edges},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
             )
 
-        # 메타 저장
-        meta["last_indexed"] = datetime.now().isoformat()
-        self._save_meta(meta)
+            # BM25 인덱스 구축 및 저장
+            if records:
+                bm25_data = {
+                    "tokens": [
+                        tokenize(f"{r['title']} {r['summary']}") for r in records
+                    ],
+                    "paths": [r["path"] for r in records],
+                }
+                bm25_path = self.db_path / "bm25_index.json"
+                bm25_path.write_text(
+                    json.dumps(bm25_data, ensure_ascii=False), encoding="utf-8"
+                )
+
+            # 메타 저장
+            meta["last_indexed"] = datetime.now().isoformat()
+            self._save_meta(meta)
 
         duration_ms = int((time.time() - start_time) * 1000)
 

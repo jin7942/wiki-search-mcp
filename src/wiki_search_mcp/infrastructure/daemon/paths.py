@@ -50,6 +50,20 @@ def serve_lock_file(wiki_path: Path) -> Path:
     return state_dir(wiki_path) / "serve.lock"
 
 
+def reindex_lock_file(wiki_path: Path) -> Path:
+    """reindex 직렬화용 cross-process flock 락 파일.
+
+    serve / daemon / CLI 등 같은 vault에 접근하는 모든 프로세스가 공유한다.
+    LanceDB ``create_table(mode="overwrite")`` 와 graph/bm25/meta JSON 쓰기를
+    동시에 두 프로세스가 수행하면 매니페스트 버전 경쟁 / JSON 부분 손상이 날 수
+    있어, 이 락으로 reindex의 파일 쓰기 구간만 직렬화한다.
+
+    daemon.lock / serve.lock 과 달리 단일 인스턴스 표식이 아니라 임계구역 락이다
+    (여러 프로세스가 순차로 획득·해제한다).
+    """
+    return state_dir(wiki_path) / "reindex.lock"
+
+
 def log_file(wiki_path: Path) -> Path:
     return state_dir(wiki_path) / "daemon.log"
 

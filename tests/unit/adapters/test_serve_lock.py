@@ -1,8 +1,12 @@
-"""serve 단일 인스턴스 락 회귀 테스트 (v0.3.0, P2 중복 기동 방지).
+"""watcher 소유권 락 회귀 테스트 (v0.5.0, 동시 MCP 클라이언트 지원).
 
-같은 vault 에 대해 MCP serve 가 중복 기동되면 file watcher 가 같은 파일을 두 번
-보고 reindex 가 중복 트리거되어 LanceDB 매니페스트 race 가 날 수 있다. serve 진입점이
-serve 전용 PidLock 을 잡아 두 번째 인스턴스를 거부해야 한다.
+v0.3.0~0.4.0 에서는 serve 단일 인스턴스 락이 두 번째 serve 를 sys.exit(0) 으로
+종료시켜, 같은 vault 에 Claude Code + Claude Desktop 이 동시에 붙지 못했다.
+
+v0.5.0 부터 serve 락은 "watcher 소유권" 표식으로 의미가 바뀐다:
+- 락을 잡은 serve 만 watcher(자동 reindex)를 돌린다.
+- 락을 못 잡은 serve 는 종료하지 않고 검색 전용으로 계속 동작한다.
+- reindex 동시성 안전은 indexer 의 cross-process reindex flock 이 보장한다.
 """
 
 from __future__ import annotations
@@ -34,42 +38,50 @@ def test_serve_lock_files_are_separate_from_daemon(tmp_path: Path) -> None:
     assert serve_lock_file(wiki).name == "serve.lock"
 
 
-def test_second_serve_lock_rejected(tmp_path: Path) -> None:
-    """첫 serve 가 락을 잡으면 두 번째 acquire 시도는 ALREADY_RUNNING 으로 거부."""
-    from wiki_search_mcp.core.exceptions import DaemonError
+def test_reindex_lock_file_is_shared_path(tmp_path: Path) -> None:
+    """reindex 락은 serve/daemon 락과 별개의 vault-공유 경로여야 한다."""
     from wiki_search_mcp.infrastructure.daemon.paths import (
+        reindex_lock_file,
         serve_lock_file,
-        serve_pid_file,
+        state_lock_file,
     )
-    from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
 
     wiki = tmp_path / "vault"
     wiki.mkdir()
+    assert reindex_lock_file(wiki).name == "reindex.lock"
+    assert reindex_lock_file(wiki) != serve_lock_file(wiki)
+    assert reindex_lock_file(wiki) != state_lock_file(wiki)
+    # 같은 vault 면 항상 같은 경로 (cross-process 공유의 전제)
+    assert reindex_lock_file(wiki) == reindex_lock_file(wiki)
 
-    first = PidLock(serve_lock_file(wiki), serve_pid_file(wiki))
-    first.acquire()
+
+def test_first_serve_owns_watcher(tmp_path: Path) -> None:
+    """첫 serve 는 watcher 소유권 락을 잡는다 (True)."""
+    from wiki_search_mcp.adapters.mcp import server
+
+    wiki = tmp_path / "vault"
+    wiki.mkdir()
     try:
-        second = PidLock(serve_lock_file(wiki), serve_pid_file(wiki))
-        with pytest.raises(DaemonError) as exc:
-            second.acquire()
-        assert exc.value.context.code == "ALREADY_RUNNING"
+        assert server._acquire_watcher_lock(wiki) is True
     finally:
-        first.release()
+        if server._serve_lock is not None:
+            server._serve_lock.release()
+            server._serve_lock = None
 
 
-def test_acquire_serve_lock_returns_false_when_locked(
+def test_second_serve_runs_search_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``_acquire_serve_lock`` 은 이미 락이 잡혀 있으면 False 를 반환해야 한다.
+    """두 번째 serve 는 watcher 락을 못 잡아도 종료하지 않고 False 만 반환.
 
-    server.main() 은 False 면 ``sys.exit(0)`` 으로 깨끗하게 빠진다.
+    (False = 검색 전용 모드. server.main 은 sys.exit 하지 않는다.)
     """
-    from wiki_search_mcp.adapters.mcp import server
     from wiki_search_mcp.infrastructure.daemon.paths import (
         serve_lock_file,
         serve_pid_file,
     )
     from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
+    from wiki_search_mcp.adapters.mcp import server
 
     wiki = tmp_path / "vault"
     wiki.mkdir()
@@ -77,19 +89,27 @@ def test_acquire_serve_lock_returns_false_when_locked(
     holder = PidLock(serve_lock_file(wiki), serve_pid_file(wiki))
     holder.acquire()
     try:
-        assert server._acquire_serve_lock(wiki) is False
+        # 두 번째 serve: 락 실패 → False (검색 전용), 예외/종료 없음
+        assert server._acquire_watcher_lock(wiki) is False
     finally:
         holder.release()
 
 
-def test_acquire_serve_lock_succeeds_when_free(tmp_path: Path) -> None:
-    from wiki_search_mcp.adapters.mcp import server
+def test_cross_process_lock_serializes(tmp_path: Path) -> None:
+    """cross_process_lock 은 같은 경로에 대해 동시 획득을 막고, 해제 후 재획득 가능."""
+    from wiki_search_mcp.infrastructure.daemon.paths import reindex_lock_file
+    from wiki_search_mcp.infrastructure.daemon.pidfile import cross_process_lock
 
     wiki = tmp_path / "vault"
     wiki.mkdir()
-    try:
-        assert server._acquire_serve_lock(wiki) is True
-    finally:
-        if server._serve_lock is not None:
-            server._serve_lock.release()
-            server._serve_lock = None
+    lock_path = reindex_lock_file(wiki)
+
+    with cross_process_lock(lock_path, timeout=1.0) as locked_outer:
+        assert locked_outer is True
+        # 같은 프로세스라도 flock 은 fd 단위라 별도 fd 로 LOCK_NB 시도 시 대기→timeout.
+        with cross_process_lock(lock_path, timeout=0.3) as locked_inner:
+            assert locked_inner is False  # 이미 점유 중 → timeout 으로 False
+
+    # 해제 후 다시 획득 가능
+    with cross_process_lock(lock_path, timeout=1.0) as locked_again:
+        assert locked_again is True
