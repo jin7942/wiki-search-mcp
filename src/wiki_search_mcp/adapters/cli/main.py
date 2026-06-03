@@ -273,7 +273,7 @@ def index(
 
 
 @main.command()
-@click.argument("wiki_path", type=click.Path(exists=True))
+@click.argument("wiki_path", type=click.Path())
 @_runtime_options
 def serve(
     wiki_path: str,
@@ -294,13 +294,35 @@ def serve(
         wiki-search-mcp serve ~/my-notes --log-level DEBUG
         wiki-search-mcp serve ~/notes --no-watch --model fast
     """
+    # 경로 존재 검증을 click ``exists=True`` 대신 여기서 직접 한다.
+    # click 의 자동 거부는 stderr 에 "Invalid value for 'WIKI_PATH'" 만 남기고
+    # 비표준 종료해, Claude Desktop 로그에는 "exited early" 로만 보여 원인 파악이
+    # 어렵다. iCloud/Obsidian vault 는 동기화 지연이나 경로 변경(config 잔재)으로
+    # 일시적으로 사라질 수 있으므로, 명확한 한 줄 안내를 남기고 종료한다.
+    resolved = Path(wiki_path).expanduser().resolve()
+    if not resolved.exists():
+        click.echo(
+            f"[wiki-search] vault 경로를 찾을 수 없습니다: {resolved}\n"
+            "  - iCloud/Obsidian 동기화 중이면 잠시 후 자동 재시도됩니다.\n"
+            "  - 경로가 바뀌었다면 Claude Desktop config 의 args 를 갱신하거나\n"
+            "    `wiki-search-mcp config <새 경로>` 로 다시 등록하세요.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if not resolved.is_dir():
+        click.echo(
+            f"[wiki-search] vault 경로가 디렉토리가 아닙니다: {resolved}",
+            err=True,
+        )
+        raise SystemExit(1)
+
     from wiki_search_mcp.adapters.mcp.server import (
         ServerOptions,
         main as server_main,
     )
 
     options = ServerOptions(
-        wiki_path=Path(wiki_path).resolve(),
+        wiki_path=resolved,
         model=model,
         ignore_patterns=tuple(ignore_patterns),
         watch=watch,

@@ -730,16 +730,31 @@ def main(options: ServerOptions) -> None:
     _owns_watcher = _acquire_watcher_lock(options.wiki_path)
 
     if _owns_watcher:
-        # 파일 감시 시작 (소유 인스턴스만)
-        start_watcher()
-
-        # 인덱스 비어있으면 백그라운드 자동 인덱싱 (첫 사용 UX 개선)
-        _bootstrap_index_if_empty()
-
-        # 종료 시 정리
+        # 파일 감시 + 부트스트랩을 백그라운드 스레드에서 시작한다.
+        #
+        # 과거에는 main 스레드에서 start_watcher() → _bootstrap 을 동기로 호출한 뒤
+        # mcp.run() 으로 진입했다. 그 결과 무거운 작업(임베딩 모델 로드, 첫 reindex)
+        # 이 MCP 핸드셰이크(initialize 응답)와 같은 프로세스에서 CPU/GIL 을 다투어
+        # 핸드셰이크가 수 분~십수 분 지연되고 클라이언트가 30초 타임아웃으로
+        # "연결 실패" 를 띄웠다 (운영 로그의 17분 initialize 지연).
+        #
+        # watcher 등록/부트스트랩은 핸드셰이크 정확성과 무관하므로, 짧게 뒤로
+        # 미뤄 mcp.run() 이 먼저 stdio 핸드셰이크를 받게 한다. reindex 동시성
+        # 안전은 indexer 의 cross-process flock 이 보장한다.
         atexit.register(stop_watcher)
 
-    # MCP 서버 실행
+        def _deferred_startup() -> None:
+            try:
+                start_watcher()
+                _bootstrap_index_if_empty()
+            except Exception:
+                logger.exception("deferred startup (watcher/bootstrap) failed")
+
+        threading.Thread(
+            target=_deferred_startup, name="wiki-deferred-startup", daemon=True
+        ).start()
+
+    # MCP 서버 실행 (stdio 핸드셰이크를 즉시 처리)
     mcp.run()
 
 

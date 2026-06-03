@@ -195,6 +195,36 @@ class WikiIndexer:
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    def _create_or_replace_table(self, records: list[dict[str, Any]]) -> None:
+        """``wiki`` 테이블을 records 로 덮어쓴다 (overwrite 회귀 대응).
+
+        반드시 cross-process reindex flock 안에서 호출해야 한다 (drop+create
+        사이에 다른 프로세스가 끼어들지 않음을 락이 보장).
+
+        1. ``mode="overwrite"`` 로 단일 호출 시도 (정상 경로).
+        2. ``Table ... already exists`` 류 예외가 나면 명시적으로 drop 후 재생성.
+        3. drop 자체가 "테이블 없음" 으로 실패하면 무시하고 create 재시도.
+        """
+        try:
+            self.db.create_table("wiki", records, mode="overwrite")
+            return
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                raise
+            logger.warning(
+                "create_table(overwrite) hit 'already exists'; "
+                "falling back to drop+create: %s",
+                e,
+            )
+
+        # 폴백: 명시적 drop 후 재생성.
+        try:
+            self.db.drop_table("wiki")
+        except Exception as drop_err:
+            # 이미 없거나 drop 미지원 — create 로 진행.
+            logger.debug("drop_table('wiki') ignored: %s", drop_err)
+        self.db.create_table("wiki", records)
+
     def reindex(self, full: bool = False) -> dict[str, Any]:
         """전체 또는 증분 인덱싱.
 
@@ -376,13 +406,18 @@ class WikiIndexer:
                 )
 
             # LanceDB 테이블 생성/갱신.
-            # ``drop_table`` + ``create_table``을 분리하면 다중 worker daemon에서
-            # race가 발생한다 (worker A가 drop한 직후 worker B가 list_tables를 보고
-            # 다시 create를 시도하다 ``Table 'wiki' already exists`` 충돌).
-            # lancedb가 제공하는 ``mode="overwrite"`` 단일 호출은 내부적으로 atomic하므로
-            # 명시적인 drop이 불필요하다.
+            # ``mode="overwrite"`` 단일 호출이 정석이지만, lancedb 일부 버전
+            # (특히 0.4~0.30 범위)에서 매니페스트 상태에 따라 overwrite 인데도
+            # ``Table 'wiki' already exists`` 를 던지는 회귀가 있다. 운영 로그상
+            # 이 예외가 reindex 를 수천 건 막아 인덱스가 영영 갱신되지 않았다.
+            #
+            # 이 블록 전체가 cross-process reindex flock 안에서 실행되므로
+            # drop_table + create_table 을 분리해도 다중 프로세스 race 가 없다
+            # (락이 없던 과거에는 drop 직후 다른 worker 가 끼어드는 문제가 있었다).
+            # 따라서 overwrite 를 먼저 시도하고, already-exists 류 실패 시
+            # 명시적 drop 후 재생성으로 폴백한다.
             if records:
-                self.db.create_table("wiki", records, mode="overwrite")
+                self._create_or_replace_table(records)
 
             # 그래프 저장
             graph_path.write_text(

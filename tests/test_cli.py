@@ -205,3 +205,30 @@ class TestServeCommandSignature:
         assert "--debounce" in result.output
         assert "--log-level" in result.output
         assert "--log-file" in result.output
+
+
+class TestServePathValidation:
+    """serve 명령의 vault 경로 검증 (연결 안정성 v0.5.0)."""
+
+    def test_serve_missing_path_clear_message(self, tmp_path):
+        """없는 경로면 친절한 안내 후 exit_code != 0 (click 기본 오류 아님)."""
+        from wiki_search_mcp.adapters.cli.main import main
+
+        runner = CliRunner()
+        missing = str(tmp_path / "no_such_vault")
+        result = runner.invoke(main, ["serve", missing])
+        assert result.exit_code != 0
+        assert "vault 경로를 찾을 수 없습니다" in result.output
+        # click 의 기본 거부 메시지가 아니어야 함
+        assert "Invalid value for" not in result.output
+
+    def test_serve_file_not_dir(self, tmp_path):
+        """경로가 파일이면 디렉토리 아님 안내."""
+        from wiki_search_mcp.adapters.cli.main import main
+
+        f = tmp_path / "a_file.md"
+        f.write_text("x", encoding="utf-8")
+        runner = CliRunner()
+        result = runner.invoke(main, ["serve", str(f)])
+        assert result.exit_code != 0
+        assert "디렉토리가 아닙니다" in result.output
