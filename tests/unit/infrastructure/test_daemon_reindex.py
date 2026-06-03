@@ -166,19 +166,34 @@ async def test_reindex_failure_records_reindex_error_count() -> None:
         )
 
 
-def test_indexer_uses_mode_overwrite_to_avoid_race() -> None:
-    """``reindex(full=True)``는 lancedb ``create_table(mode='overwrite')`` 단일 호출로
-    수행되어야 한다. 별도 ``drop_table`` → ``create_table`` 분리는
-    multi-worker daemon에서 race를 유발한다 (v0.2.3 장애 보고서).
+def test_indexer_prefers_overwrite_with_guarded_drop_fallback() -> None:
+    """테이블 쓰기는 ``mode='overwrite'`` 를 우선 시도해야 한다.
+
+    배경 변경(v0.5.0): 과거(v0.2.3)에는 drop_table 분리가 multi-worker race 를
+    유발해 금지했으나, 이제 테이블 쓰기 전체가 cross-process reindex flock
+    (``cross_process_lock(self._reindex_lock_path)``) 안에서 실행되므로 drop+create
+    분리에 race 가 없다. 그리고 lancedb 일부 버전에서 overwrite 가 already-exists
+    를 던지는 회귀가 reindex 를 수천 건 막았으므로, overwrite 실패 시 drop+create
+    폴백이 필요하다.
+
+    새 불변식:
+    - overwrite 를 먼저 시도한다 (정상 경로).
+    - drop_table 폴백은 reindex flock 안에서만 호출된다.
     """
-    src_path = Path(__file__).resolve().parents[3] / "src" / "wiki_search_mcp" / "infrastructure" / "indexing" / "indexer.py"
-    source = src_path.read_text(encoding="utf-8")
-    # drop_table 호출이 reindex 경로에서 제거됐는지 — open_table을 위한 list_tables는 허용
-    # 새 가드: create_table 호출에 mode="overwrite" 명시
-    assert 'create_table("wiki", records, mode="overwrite")' in source, (
-        "indexer.reindex가 mode='overwrite'를 사용하지 않음 — race 회귀 가능"
+    src_path = (
+        Path(__file__).resolve().parents[3]
+        / "src" / "wiki_search_mcp" / "infrastructure" / "indexing" / "indexer.py"
     )
-    # 명시적 drop_table 호출은 사라져야 함
-    assert "drop_table(\"wiki\")" not in source, (
-        "drop_table+create_table 분리는 두 worker 동시 실행 시 race 발생"
+    source = src_path.read_text(encoding="utf-8")
+    # overwrite 를 여전히 우선 시도해야 한다.
+    assert 'create_table("wiki", records, mode="overwrite")' in source, (
+        "indexer 가 mode='overwrite' 우선 시도를 하지 않음"
+    )
+    # 폴백 헬퍼가 존재해야 한다.
+    assert "_create_or_replace_table" in source, (
+        "overwrite already-exists 폴백 헬퍼가 없음 — reindex 영구 실패 위험"
+    )
+    # 테이블 쓰기는 cross-process flock 안에서 수행되어야 한다 (drop 폴백 race 방지).
+    assert "cross_process_lock(self._reindex_lock_path)" in source, (
+        "테이블 쓰기가 reindex flock 으로 보호되지 않음 — drop+create race 위험"
     )

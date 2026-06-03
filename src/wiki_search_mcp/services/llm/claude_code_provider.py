@@ -65,6 +65,8 @@ class ClaudeCodeProvider:
         model: str = "haiku",
         cli_path: str | None = None,
         timeout_s: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff_s: tuple[float, ...] = (2.0, 8.0),
     ):
         if not _SDK_AVAILABLE:
             raise ClassifierError.of(
@@ -73,6 +75,10 @@ class ClaudeCodeProvider:
             )
         self._model = model
         self._timeout_s = timeout_s
+        # transient 실패(타임아웃 / 네트워크·프로세스 오류) 재시도 정책.
+        # CLI 미설치(CLI_NOT_FOUND)는 재시도해도 무의미하므로 즉시 실패시킨다.
+        self._max_retries = max(0, max_retries)
+        self._retry_backoff_s = retry_backoff_s
         self._opts = ClaudeAgentOptions(
             model=model,
             max_turns=1,
@@ -94,31 +100,61 @@ class ClaudeCodeProvider:
 
     async def classify(self, req: ClassificationRequest) -> ClassificationDecision:
         prompt = build_user_prompt(req)
-        try:
-            text = await asyncio.wait_for(self._drain(prompt), timeout=self._timeout_s)
-        except asyncio.TimeoutError as e:
-            raise ClassifierError.of(
-                f"LLM call timed out after {self._timeout_s}s",
-                code="TIMEOUT",
-            ) from e
-        except CLINotFoundError as e:
-            raise ClassifierError.of(
-                "claude CLI not found. Run `claude login` first.",
-                code="CLI_NOT_FOUND",
-            ) from e
-        except (ProcessError, CLIJSONDecodeError, CLIConnectionError) as e:
-            raise ClassifierError.of(
-                f"Claude SDK error: {e}",
-                code="SDK_ERROR",
-            ) from e
 
-        return parse_decision(
-            path=req.path,
-            raw=text,
-            provider=f"{self.name}:{self._model}",
-            active_categories=req.active_categories,
-            subfolders_by_category=dict(req.subfolders_by_category or {}),
-        )
+        # transient 실패(타임아웃 / 네트워크·프로세스 오류)는 exponential backoff
+        # 로 재시도한다. 운영 로그상 단발 타임아웃 1회로 파일이 600초 cooldown 후
+        # 사실상 영구 pending 되던 문제를 완화한다. CLI 미설치는 재시도 무의미.
+        last_err: ClassifierError | None = None
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            try:
+                text = await asyncio.wait_for(
+                    self._drain(prompt), timeout=self._timeout_s
+                )
+                return parse_decision(
+                    path=req.path,
+                    raw=text,
+                    provider=f"{self.name}:{self._model}",
+                    active_categories=req.active_categories,
+                    subfolders_by_category=dict(req.subfolders_by_category or {}),
+                )
+            except asyncio.TimeoutError as e:
+                last_err = ClassifierError.of(
+                    f"LLM call timed out after {self._timeout_s}s",
+                    code="TIMEOUT",
+                )
+                last_err.__cause__ = e
+            except CLINotFoundError as e:
+                # 재시도 불가 — 즉시 실패.
+                raise ClassifierError.of(
+                    "claude CLI not found. Run `claude login` first.",
+                    code="CLI_NOT_FOUND",
+                ) from e
+            except (ProcessError, CLIJSONDecodeError, CLIConnectionError) as e:
+                last_err = ClassifierError.of(
+                    f"Claude SDK error: {e}",
+                    code="SDK_ERROR",
+                )
+                last_err.__cause__ = e
+
+            # 여기 도달 = transient 실패. 남은 시도가 있으면 backoff 후 재시도.
+            if attempt < attempts - 1:
+                backoff = self._retry_backoff_s[
+                    min(attempt, len(self._retry_backoff_s) - 1)
+                ]
+                logger.warning(
+                    "LLM classify transient failure (%s), retry %d/%d after %.1fs: %s",
+                    getattr(last_err.context, "code", "?") if last_err.context else "?",
+                    attempt + 1,
+                    self._max_retries,
+                    backoff,
+                    req.path,
+                )
+                await asyncio.sleep(backoff)
+
+        # 모든 시도 소진.
+        assert last_err is not None
+        raise last_err
 
     async def healthcheck(self) -> None:
         """간단한 ping 호출로 OAuth + CLI 정상 여부 확인.

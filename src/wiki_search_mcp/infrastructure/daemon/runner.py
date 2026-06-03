@@ -26,7 +26,7 @@ from wiki_search_mcp.core.exceptions import (
     RateLimitError,
 )
 from wiki_search_mcp.core.logging import setup_logging
-from wiki_search_mcp.core.metrics import configure_metrics, record
+from wiki_search_mcp.core.metrics import configure_metrics
 from wiki_search_mcp.core.utils import resolve_pages_path
 from wiki_search_mcp.infrastructure.daemon.options import DaemonOptions
 from wiki_search_mcp.infrastructure.daemon.paths import (
@@ -199,7 +199,15 @@ class DaemonRunner:
             tasks = [*workers]
             if periodic is not None:
                 tasks.append(periodic)
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # gather(return_exceptions=True) 는 예외를 반환값으로 돌리므로
+            # 직접 검사하지 않으면 worker/periodic 의 비정상 종료가 silent 가 된다.
+            # cancel() 로 인한 CancelledError 는 정상 종료 신호이므로 제외.
+            for i, res in enumerate(results):
+                if isinstance(res, BaseException) and not isinstance(
+                    res, asyncio.CancelledError
+                ):
+                    logger.error("daemon task[%d] exited abnormally: %r", i, res)
             watcher.stop()
             self._status.update(state="stopped", stopped_at=_utc_now())
             logger.info("daemon stopped.")
@@ -219,8 +227,14 @@ class DaemonRunner:
                 pass
             try:
                 await self._rescan()
-            except Exception:
+            except Exception as e:
+                # 침묵 금지: 로깅 + status 에 마지막 오류를 노출해 사용자가
+                # `daemon status` 로 rescan 이 막혔음을 알 수 있게 한다.
                 logger.exception("periodic rescan failed")
+                self._status.update(
+                    last_rescan_error=str(e),
+                    last_rescan_error_at=_utc_now(),
+                )
 
     # ---------------------------------------------------------------- watcher
     def _on_watch_event(self) -> None:
@@ -238,10 +252,14 @@ class DaemonRunner:
         # 인덱스 비어있을 수도 있음 — find_pending은 디스크 차집합도 함께 봄
         try:
             items = self._container.classification_service.find_pending(limit=200)
-        except Exception:
+        except Exception as e:
             logger.exception("find_pending() failed")
-            # silent failure 방지 — daemon_status.json의 error_count로 외부에 노출.
-            self._status.increment("error_count")
+            # silent failure 방지 — error_count + 마지막 오류 메시지를 status 에 노출.
+            self._status.increment(
+                "error_count",
+                last_rescan_error=str(e),
+                last_rescan_error_at=_utc_now(),
+            )
             return
         now = time.monotonic()
         # 만료된 cooldown 정리
@@ -401,11 +419,25 @@ class DaemonRunner:
             else:
                 await asyncio.to_thread(self._indexer.reindex, full=False)
             self._container.invalidate_all()
-        except Exception:
+        except Exception as e:
             logger.exception("post-apply reindex failed (continuing)")
-            # 분류 자체는 성공이므로 error_count는 그대로 두되,
-            # 운영자가 인덱스 갱신 누락을 감지할 수 있도록 별도 카운터로 노출.
-            self._status.increment("reindex_error_count")
+            # 분류(frontmatter 적용)는 이미 성공했으므로 error_count 는 그대로 두되,
+            # 운영자가 인덱스 갱신 누락을 감지할 수 있도록 별도 카운터 + 마지막
+            # 오류 + pending.jsonl(reason=reindex_failed) 로 가시화한다. 인덱스에
+            # 반영 안 된 파일은 다음 rescan 의 디스크 차집합 스캔에서 다시 잡힌다.
+            self._status.increment(
+                "reindex_error_count",
+                last_reindex_error=str(e),
+                last_reindex_error_at=_utc_now(),
+            )
+            self._pending.append(
+                {
+                    "path": record.path_after,
+                    "reason": "reindex_failed",
+                    "message": str(e),
+                    "recorded_at": _utc_now(),
+                }
+            )
         self._status.increment("applied_count", last_classified_at=_utc_now())
 
 

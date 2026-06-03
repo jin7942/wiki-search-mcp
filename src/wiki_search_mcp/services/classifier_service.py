@@ -141,15 +141,14 @@ class ClassifierService:
             decision.confidence,
             list(decision.tags),
         )
-        # 구조화 메트릭: LLM 분류 호출 시간/결과. retries 는 provider 가 부여
-        # (재시도 정책 도입 후). 분류 지연 원인 추적의 핵심 지표.
+        # 구조화 메트릭: LLM 분류 호출 시간/결과. 분류 지연 원인 추적의 핵심 지표.
+        # (재시도는 provider 내부에서 처리되며 transient 실패는 logger.warning 으로 남음.)
         record(
             "llm_classify",
             duration_ms=llm_ms,
             path=rel_path,
             category=decision.category,
             confidence=round(decision.confidence, 2),
-            retries=getattr(decision, "retries", 0),
         )
         return decision
 
