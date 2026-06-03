@@ -6,6 +6,7 @@ from __future__ import annotations
 LanceDB에 저장합니다. Wikilink 관계도 graph.json으로 저장합니다.
 """
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -13,15 +14,15 @@ from pathlib import Path
 from typing import Any
 
 import lancedb
-from sentence_transformers import SentenceTransformer
 
-from wiki_search_mcp.core.config import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS, WikiConfig
+from wiki_search_mcp.core.config import DEFAULT_EMBEDDING_MODEL, WikiConfig
 from wiki_search_mcp.core.logging import get_logger
+from wiki_search_mcp.core.metrics import record
 from wiki_search_mcp.core.types import ConfidenceDict, FrontmatterDict
 from wiki_search_mcp.core.utils import parse_frontmatter, resolve_pages_path, tokenize
-from wiki_search_mcp.core.metrics import record
 from wiki_search_mcp.infrastructure.daemon.paths import reindex_lock_file
 from wiki_search_mcp.infrastructure.daemon.pidfile import cross_process_lock
+from wiki_search_mcp.infrastructure.embedding.model_provider import get_model
 from wiki_search_mcp.infrastructure.ignore import IgnoreMatcher
 from wiki_search_mcp.infrastructure.storage.lancedb_compat import has_table
 
@@ -76,15 +77,17 @@ class WikiIndexer:
         self.db_path = self.wiki_path / ".vectordb"
         self.db_path.mkdir(parents=True, exist_ok=True)
 
-        # 모델 로드 (첫 실행 시 다운로드)
-        # 우선순위: 인자 > WikiConfig.embedding_model > 기본값
+        # 모델 로드 — 싱글톤 provider 사용.
+        # 우선순위: 인자 > WikiConfig.embedding_model > 기본값.
+        # 과거에는 SentenceTransformer 를 직접 생성해 Searcher 의 모델과 별도
+        # 인스턴스가 메모리에 중복 로드됐다. get_model() 은 모델 경로별 전역
+        # 캐시라, 같은 모델은 프로세스당 한 번만 로드된다.
         model_key = (
             model_name
             or self.wiki_config.embedding_model
             or DEFAULT_EMBEDDING_MODEL
         )
-        model_to_use = EMBEDDING_MODELS.get(model_key, model_key)
-        self.model = SentenceTransformer(model_to_use)
+        self.model = get_model(model_key)
 
         # LanceDB 연결
         self.db = lancedb.connect(str(self.db_path))
@@ -183,6 +186,54 @@ class WikiIndexer:
     def _get_file_mtime(self, path: Path) -> float:
         """파일 수정 시간 반환."""
         return path.stat().st_mtime
+
+    def _get_file_hash(self, path: Path) -> str:
+        """파일 내용의 SHA-256 해시(hex) 반환.
+
+        mtime 만으로는 ``touch`` / ``git checkout`` 처럼 내용이 그대로인데
+        수정 시간만 바뀌는 경우를 거르지 못한다. 내용 해시를 병행해
+        '실제로 바뀐 파일' 만 재임베딩한다.
+        """
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _is_unchanged(self, stored: Any, page: Path, mtime: float) -> tuple[bool, str | None]:
+        """``page`` 가 기존 인덱스 대비 변경되지 않았는지 판정.
+
+        성능을 위해 mtime 을 먼저 본다(파일 읽기 없음). mtime 이 같으면
+        내용도 같다고 보고 즉시 미변경 처리한다. mtime 이 다를 때만 내용
+        해시를 계산해, 해시가 같으면(= 내용은 그대로) 미변경으로 판정한다.
+
+        Args:
+            stored: ``meta["files"][rel_path]`` 에 저장된 값. 신규 포맷은
+                ``{"mtime": float, "hash": str}`` 딕셔너리, 구버전은 float
+                (mtime 단독). ``None`` 이면 신규 파일.
+            page: 검사할 파일 경로.
+            mtime: 이미 계산해 둔 현재 mtime (중복 stat 회피).
+
+        Returns:
+            ``(unchanged, current_hash)`` 튜플. ``unchanged`` 가 True 면
+            재처리 불필요. ``current_hash`` 는 해시를 계산했을 때만 채워지며
+            (mtime 갱신 저장에 사용), 계산하지 않았으면 ``None``.
+        """
+        # 신규 파일
+        if stored is None:
+            return False, None
+
+        # 구버전 포맷(float): 해시 정보가 없으므로 mtime 으로만 판정.
+        # 다음 번 처리 시 자연히 신규 포맷으로 승격된다.
+        if not isinstance(stored, dict):
+            return stored == mtime, None
+
+        stored_mtime = stored.get("mtime")
+        stored_hash = stored.get("hash")
+
+        # 빠른 경로: mtime 일치 → 내용도 동일하다고 간주(읽기 없음)
+        if stored_mtime == mtime:
+            return True, None
+
+        # mtime 이 다르면 내용 해시로 실제 변경 여부 확인
+        current_hash = self._get_file_hash(page)
+        return current_hash == stored_hash, current_hash
 
     def _load_meta(self) -> dict[str, Any]:
         """메타데이터 로드."""
@@ -302,8 +353,14 @@ class WikiIndexer:
             current_paths.add(rel_path)
             mtime = self._get_file_mtime(page)
 
-            # 증분 체크: 수정 시간이 같으면 기존 데이터 재사용
-            if not full and meta["files"].get(rel_path) == mtime:
+            # 증분 체크: mtime+내용해시 병행. mtime 이 같으면 즉시 재사용,
+            # 다르면 해시로 실제 변경 여부 확인.
+            unchanged, current_hash = (
+                (False, None)
+                if full
+                else self._is_unchanged(meta["files"].get(rel_path), page, mtime)
+            )
+            if unchanged:
                 # 기존 레코드 복원
                 if rel_path in existing_records:
                     records.append(existing_records[rel_path])
@@ -313,23 +370,32 @@ class WikiIndexer:
                     graph_nodes.append(existing_nodes[rel_path])
                 if rel_path in existing_edges_by_source:
                     graph_edges.extend(existing_edges_by_source[rel_path])
+
+                # mtime 만 바뀌고 내용은 동일한 경우(touch/checkout):
+                # 저장된 mtime 을 갱신해 다음 reindex 에서 재해시를 피한다.
+                if current_hash is not None:
+                    meta["files"][rel_path] = {"mtime": mtime, "hash": current_hash}
             else:
-                # 변경된 파일: 처리 대상에 추가
+                # 변경된 파일: 처리 대상에 추가 (이미 계산한 해시 재사용)
                 pages_to_process.append((page, rel_path, mtime))
 
         # 2단계: 변경된 파일들의 텍스트 수집
         texts_for_embedding: list[str] = []
-        page_data: list[tuple[str, dict, str, list[str], float]] = []
-        # (rel_path, page_meta, body, links, mtime)
+        page_data: list[tuple[str, dict, str, list[str], float, str]] = []
+        # (rel_path, page_meta, body, links, mtime, content_hash)
 
         for page, rel_path, mtime in pages_to_process:
             content = page.read_text(encoding="utf-8")
+            # 내용 해시: 반드시 _get_file_hash(read_bytes 기반)와 동일 방식이어야
+            # 빠른 경로의 해시 비교가 일치한다. read_text 는 개행 정규화(CRLF→LF)를
+            # 하므로 content.encode 로 계산하면 불일치가 생길 수 있어 raw 바이트로 해싱.
+            content_hash = self._get_file_hash(page)
             page_meta, body = parse_frontmatter(content)
             title = page_meta.get("title", page.stem)
             links = self.extract_wikilinks(content)
 
             texts_for_embedding.append(f"{title} {body[:2000]}")
-            page_data.append((rel_path, page_meta, body, links, mtime))
+            page_data.append((rel_path, page_meta, body, links, mtime, content_hash))
 
         # 3단계: 배치 임베딩 (한 번에 처리)
         embeddings = []
@@ -344,7 +410,7 @@ class WikiIndexer:
             embed_ms = round((time.perf_counter() - _embed_start) * 1000, 1)
 
         # 4단계: 레코드 생성
-        for i, (rel_path, page_meta, body, links, mtime) in enumerate(page_data):
+        for i, (rel_path, page_meta, body, links, mtime, content_hash) in enumerate(page_data):
             title = page_meta.get("title", Path(rel_path).stem)
             embedding = embeddings[i].tolist() if i < len(embeddings) else []
 
@@ -386,8 +452,8 @@ class WikiIndexer:
                     graph_edges.append({"source": rel_path, "target": target})
                     seen_targets.add(target)
 
-            # 메타 업데이트
-            meta["files"][rel_path] = mtime
+            # 메타 업데이트 (신규 포맷: mtime + 내용 해시)
+            meta["files"][rel_path] = {"mtime": mtime, "hash": content_hash}
             updated_count += 1
 
         # 삭제된 파일 메타에서 제거
