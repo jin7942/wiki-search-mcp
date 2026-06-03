@@ -78,3 +78,13 @@ def pending_jsonl(wiki_path: Path) -> Path:
 
 def applied_jsonl(wiki_path: Path) -> Path:
     return state_dir(wiki_path) / "applied.jsonl"
+
+
+def metrics_jsonl(wiki_path: Path) -> Path:
+    """성능 분석용 구조화 메트릭 로그 (JSON Lines).
+
+    평문 daemon.log 와 별개로, reindex / 검색 / LLM 분류 등의 이벤트를
+    ``event`` + ``duration_ms`` + 단계별 timing 필드로 기록한다. 외부 도구가
+    라인 단위 ``json.loads`` 로 집계(평균/p95/횟수)할 수 있도록 한다.
+    """
+    return state_dir(wiki_path) / "metrics.jsonl"

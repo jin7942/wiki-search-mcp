@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from wiki_search_mcp.core.config import MAX_RELATED_DOCS, RRF_K, SEARCH_MULTIPLIER
 from wiki_search_mcp.core.logging import get_logger
+from wiki_search_mcp.core.metrics import record
 from wiki_search_mcp.core.models import (
     Document,
     SearchFilters,
@@ -121,10 +122,14 @@ class SearchService:
             queries_to_search = self._expander.expand(query)
 
         # 검색 실행
+        _exec_start = time.perf_counter()
         raw_results = self._execute_search(queries_to_search, top_k, mode, vector_weight)
+        exec_ms = round((time.perf_counter() - _exec_start) * 1000, 1)
 
-        # 결과 포맷팅 및 필터링
+        # 결과 포맷팅 및 필터링 (그래프 확장 포함)
+        _fmt_start = time.perf_counter()
         formatted = self._format_and_filter(raw_results, filters, expand_graph)
+        format_ms = round((time.perf_counter() - _fmt_start) * 1000, 1)
 
         # 정렬
         formatted = self._apply_sort(formatted, sort_by, sort_order)
@@ -136,6 +141,16 @@ class SearchService:
         logger.info(
             f"Search completed: query={query!r}, results={len(formatted)}, "
             f"mode={mode}, duration={duration_ms:.1f}ms"
+        )
+        # 구조화 메트릭: 검색 단계별 timing (실행 vs 포맷/그래프확장).
+        record(
+            "search",
+            mode=mode,
+            duration_ms=round(duration_ms, 1),
+            exec_ms=exec_ms,
+            format_ms=format_ms,
+            results=len(formatted),
+            expanded=expand_query and self._expander is not None,
         )
 
         return SearchResponse.of(

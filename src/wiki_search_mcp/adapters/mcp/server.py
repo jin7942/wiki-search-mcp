@@ -724,6 +724,12 @@ def main(options: ServerOptions) -> None:
     # 로깅 초기화 (CLI 옵션 기반)
     setup_logging(level=options.log_level, log_file=options.log_file)
 
+    # 구조화 성능 메트릭 싱크 (metrics.jsonl) 설정.
+    from wiki_search_mcp.core.metrics import configure_metrics
+    from wiki_search_mcp.infrastructure.daemon.paths import metrics_jsonl
+
+    configure_metrics(metrics_jsonl(options.wiki_path))
+
     # watcher 소유권 락 (best-effort). 같은 vault 에 다른 serve 가 이미 watcher 를
     # 돌리고 있으면 이 인스턴스는 검색 전용으로 동작한다. 종료하지 않으므로
     # 여러 MCP 클라이언트가 같은 vault 를 동시에 쓸 수 있다.

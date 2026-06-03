@@ -26,11 +26,13 @@ from wiki_search_mcp.core.exceptions import (
     RateLimitError,
 )
 from wiki_search_mcp.core.logging import setup_logging
+from wiki_search_mcp.core.metrics import configure_metrics, record
 from wiki_search_mcp.core.utils import resolve_pages_path
 from wiki_search_mcp.infrastructure.daemon.options import DaemonOptions
 from wiki_search_mcp.infrastructure.daemon.paths import (
     applied_jsonl,
     log_file,
+    metrics_jsonl,
     pending_jsonl,
     pid_file,
     state_lock_file,
@@ -118,6 +120,7 @@ class DaemonRunner:
         """포그라운드 실행. PidLock 보유 상태로 asyncio 루프 진입."""
         with PidLock(state_lock_file(self._opts.wiki_path), pid_file(self._opts.wiki_path)):
             setup_logging(level=self._opts.log_level, log_file=log_file(self._opts.wiki_path))
+            configure_metrics(metrics_jsonl(self._opts.wiki_path))
             logger.info("daemon starting: wiki=%s", self._opts.wiki_path)
             asyncio.run(self._main())
 

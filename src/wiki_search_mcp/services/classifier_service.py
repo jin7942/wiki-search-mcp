@@ -13,6 +13,7 @@ Daemon이 사용하는 분류 진입점. 휴리스틱(폴더/유사문서) 결�
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,7 @@ from wiki_search_mcp.core.exceptions import (
     ClassifierError,
     DocumentNotFoundError,
 )
+from wiki_search_mcp.core.metrics import record
 from wiki_search_mcp.core.models import ClassificationDecision
 from wiki_search_mcp.core.utils import parse_frontmatter
 from wiki_search_mcp.services.llm.provider import (
@@ -128,7 +130,9 @@ class ClassifierService:
             active_categories=active,
             subfolders_by_category=subfolders,
         )
+        _llm_start = time.perf_counter()
         decision = await self._provider.classify(req)
+        llm_ms = round((time.perf_counter() - _llm_start) * 1000, 1)
         logger.info(
             "classified %s -> category=%s subcategory=%s confidence=%.2f tags=%s",
             rel_path,
@@ -136,6 +140,16 @@ class ClassifierService:
             decision.subcategory or "-",
             decision.confidence,
             list(decision.tags),
+        )
+        # 구조화 메트릭: LLM 분류 호출 시간/결과. retries 는 provider 가 부여
+        # (재시도 정책 도입 후). 분류 지연 원인 추적의 핵심 지표.
+        record(
+            "llm_classify",
+            duration_ms=llm_ms,
+            path=rel_path,
+            category=decision.category,
+            confidence=round(decision.confidence, 2),
+            retries=getattr(decision, "retries", 0),
         )
         return decision
 

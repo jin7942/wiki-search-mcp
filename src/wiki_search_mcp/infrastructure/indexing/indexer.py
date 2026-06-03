@@ -19,6 +19,7 @@ from wiki_search_mcp.core.config import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODEL
 from wiki_search_mcp.core.logging import get_logger
 from wiki_search_mcp.core.types import ConfidenceDict, FrontmatterDict
 from wiki_search_mcp.core.utils import parse_frontmatter, resolve_pages_path, tokenize
+from wiki_search_mcp.core.metrics import record
 from wiki_search_mcp.infrastructure.daemon.paths import reindex_lock_file
 from wiki_search_mcp.infrastructure.daemon.pidfile import cross_process_lock
 from wiki_search_mcp.infrastructure.ignore import IgnoreMatcher
@@ -332,12 +333,15 @@ class WikiIndexer:
 
         # 3단계: 배치 임베딩 (한 번에 처리)
         embeddings = []
+        embed_ms = 0.0
         if texts_for_embedding:
             # show_progress_bar: 대용량 Wiki에서 진행 상황 표시
+            _embed_start = time.perf_counter()
             embeddings = self.model.encode(
                 texts_for_embedding,
                 show_progress_bar=len(texts_for_embedding) > 10,
             )
+            embed_ms = round((time.perf_counter() - _embed_start) * 1000, 1)
 
         # 4단계: 레코드 생성
         for i, (rel_path, page_meta, body, links, mtime) in enumerate(page_data):
@@ -395,6 +399,7 @@ class WikiIndexer:
         # serve / daemon / CLI 가 같은 vault 에 동시에 reindex 해도 LanceDB
         # 매니페스트 race / JSON 부분 손상을 막는다. 임베딩 계산(위)은 느리지만
         # 락 밖에 두어 임계구역을 파일 쓰기 4종으로 최소화한다.
+        _write_start = time.perf_counter()
         with cross_process_lock(self._reindex_lock_path) as locked:
             if not locked:
                 # timeout: 다른 프로세스가 장시간 reindex 중. 강행하면 race 위험이
@@ -446,11 +451,26 @@ class WikiIndexer:
             meta["last_indexed"] = datetime.now().isoformat()
             self._save_meta(meta)
 
+        write_ms = round((time.perf_counter() - _write_start) * 1000, 1)
         duration_ms = int((time.time() - start_time) * 1000)
 
         logger.info(
             f"Reindex completed: indexed={len(records)}, updated={updated_count}, "
             f"deleted={len(deleted_paths)}, duration={duration_ms}ms"
+        )
+
+        # 구조화 메트릭: 단계별 timing 으로 reindex 성능을 분석 가능하게 한다.
+        # changed = 이번에 실제로 재인코딩된 문서 수 (증분에서 핵심 지표).
+        record(
+            "reindex",
+            mode=mode,
+            duration_ms=duration_ms,
+            embed_ms=embed_ms,
+            write_ms=write_ms,
+            indexed=len(records),
+            changed=len(texts_for_embedding),
+            updated=updated_count,
+            deleted=len(deleted_paths),
         )
 
         return {
