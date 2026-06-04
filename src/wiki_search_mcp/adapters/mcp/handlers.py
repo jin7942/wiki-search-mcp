@@ -649,24 +649,15 @@ def handle_wiki_daemon_status(
         ``{state, alive, pid, applied_count, pending_count, ...}`` JSON.
         오류가 나도 raise하지 않고 ``state=unknown``으로 응답.
     """
-    try:
-        from wiki_search_mcp.infrastructure.daemon import (
-            StatusFile,
-            pid_file,
-            status_file,
-        )
-        from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
+    # 읽기 로직은 infrastructure.daemon.read_daemon_status facade 에 위임한다
+    # (server/handlers 중복 제거 + 계층 직접 의존 집중). facade 가 실패 시
+    # {"state": "unknown", ...} 를 반환하므로 raise-금지 계약도 유지된다.
+    from wiki_search_mcp.infrastructure.daemon import read_daemon_status
 
-        reader = status_reader if status_reader is not None else StatusFile(status_file(wiki_path))
-        state_data = reader.read() or {}
-        checker = pid_checker if pid_checker is not None else PidLock.is_alive
-        alive, pid = checker(pid_file(wiki_path))
-        if not state_data and not alive:
-            return _json_response({"state": "not_running", "alive": False, "pid": None})
-        return _json_response({**state_data, "alive": alive, "pid": pid})
-    except Exception as e:  # noqa: BLE001 - status는 절대 raise하면 안 됨
-        logger.exception("wiki_daemon_status unexpected error: %s", e)
-        return _json_response({"state": "unknown", "error": str(e)[:200]})
+    data = read_daemon_status(
+        wiki_path, status_reader=status_reader, pid_checker=pid_checker
+    )
+    return _json_response(data)
 
 
 @mcp_handler("wiki_suggest_classification")

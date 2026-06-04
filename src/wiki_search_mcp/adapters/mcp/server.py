@@ -351,47 +351,28 @@ def wiki_reindex(full: bool = False) -> str:
 
 
 def _read_daemon_status() -> dict | None:
-    """daemon status 파일을 읽어 dict 반환. 미존재면 ``None``."""
-    try:
-        from wiki_search_mcp.infrastructure.daemon import StatusFile, status_file
-        from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
-        from wiki_search_mcp.infrastructure.daemon.paths import pid_file as _pid
+    """daemon status 파일을 읽어 dict 반환. 미존재/실패면 ``None``.
 
-        opts = _require_options()
-        data = StatusFile(status_file(opts.wiki_path)).read() or {}
-        alive, pid = PidLock.is_alive(_pid(opts.wiki_path))
-        if not data and not alive:
-            return {"state": "not_running", "alive": False, "pid": None}
-        return {**data, "alive": alive, "pid": pid}
-    except Exception:  # noqa: BLE001 - daemon 상태 조회 실패는 stats 응답을 막아서는 안 됨
+    실제 읽기는 infrastructure.daemon.read_daemon_status facade 에 위임한다
+    (server/handlers 중복 제거 + 계층 직접 의존 집중).
+    """
+    from wiki_search_mcp.infrastructure.daemon import read_daemon_status
+
+    data = read_daemon_status(_require_options().wiki_path)
+    # facade 는 실패 시 {"state": "unknown", ...} 를 주지만, stats 응답에서는
+    # 기존 계약(조회 불가 시 daemon 섹션 생략)을 유지하기 위해 None 으로 변환.
+    if data.get("state") == "unknown":
         return None
+    return data
 
 
 def _read_daemon_pending(limit: int = 50) -> list[dict] | None:
     """daemon pending.jsonl의 active entries를 path별 최신 1개만 반환."""
-    try:
-        from wiki_search_mcp.infrastructure.daemon import applied_jsonl, pending_jsonl
-        from wiki_search_mcp.infrastructure.jsonl.log import JsonlLog
+    from wiki_search_mcp.infrastructure.daemon import read_daemon_pending
 
-        opts = _require_options()
-        pending = JsonlLog(pending_jsonl(opts.wiki_path))
-        applied = JsonlLog(applied_jsonl(opts.wiki_path))
-        latest_pending: dict[str, dict] = {}
-        for entry in pending.scan():
-            path = entry.get("path")
-            if isinstance(path, str):
-                latest_pending[path] = entry
-        applied_paths: set[str] = set()
-        for entry in applied.scan():
-            for key in ("path_before", "path_after"):
-                v = entry.get(key)
-                if isinstance(v, str):
-                    applied_paths.add(v)
-        items = [e for p, e in latest_pending.items() if p not in applied_paths]
-        items.sort(key=lambda e: e.get("recorded_at", ""), reverse=True)
-        return items[:limit]
-    except Exception:  # noqa: BLE001
-        return None
+    items = read_daemon_pending(_require_options().wiki_path, limit=limit)
+    # 기존 계약: 항목 없거나 실패면 None (응답에서 pending 섹션 생략).
+    return items or None
 
 
 @mcp.tool()

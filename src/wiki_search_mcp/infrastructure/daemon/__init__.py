@@ -24,6 +24,10 @@ from wiki_search_mcp.infrastructure.daemon.paths import (
 from wiki_search_mcp.infrastructure.daemon.pidfile import PidLock
 from wiki_search_mcp.infrastructure.daemon.ratelimit import SlidingWindowRateLimit
 from wiki_search_mcp.infrastructure.daemon.statefile import StatusFile
+from wiki_search_mcp.infrastructure.daemon.status_reader import (
+    read_daemon_pending,
+    read_daemon_status,
+)
 
 __all__ = [
     "DaemonOptions",
@@ -34,6 +38,8 @@ __all__ = [
     "log_file",
     "pending_jsonl",
     "pid_file",
+    "read_daemon_pending",
+    "read_daemon_status",
     "serve_lock_file",
     "serve_pid_file",
     "state_dir",
