@@ -3,6 +3,69 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.5.0] - 2026-06-04
+
+동시 MCP 클라이언트 지원과 옛 평탄 파일 재분류 CLI 를 추가하고, 구조화 성능
+메트릭과 연결/예외 안정성을 강화했다. 이어 코드 품질 전면 점검(6차원)에서
+확인된 동시성/손상복구/계층 경계 결함을 일괄 수정했다. 테스트 690 → 739.
+
+### Added
+
+- **동시 MCP 클라이언트 지원**: 단일 인스턴스 락을 watcher 소유권 락으로 전환.
+  락을 못 잡아도 검색 전용 모드로 계속 동작한다. cross-process reindex flock
+  (indexer 파일 쓰기 4종을 감쌈)으로 serve↔serve / serve↔daemon race 차단.
+- **재분류 CLI (`daemon reclassify`)**: 옛 평탄 배치 파일(``<category>/<basename>``)
+  을 서브폴더로 재배치하는 일회성 배치. ``ReclassificationService`` 가
+  ``len(parts) != 2`` 요요 게이트로 무한 재방문을 막는다.
+- **구조화 성능 메트릭 (`metrics.jsonl`)**: ``core/metrics.py`` (configure_metrics/
+  record/timer). reindex(embed_ms/write_ms), search(exec_ms/format_ms),
+  llm_classify timing 을 단계별로 기록. 미설정 시 no-op, 기록 실패는 삼킨다.
+
+### Changed
+
+- **임베딩 모델 싱글톤**: ``WikiIndexer`` 가 ``SentenceTransformer`` 를 직접
+  생성하지 않고 ``get_model()`` 싱글톤을 사용. Searcher 와 같은 모델은
+  프로세스당 한 번만 로드(메모리 중복 제거).
+- **증분 변경감지 강화 (mtime + 내용 해시)**: mtime 일치 시 읽기 없이 미변경
+  처리, mtime 만 바뀐 경우(touch/checkout)에만 SHA-256 으로 실제 변경 여부
+  확인 → 불필요한 재임베딩 제거. ``meta["files"]`` 포맷 ``{mtime, hash}`` 로
+  승격(구버전 float 하위호환).
+- **MCP 핸들러 예외 처리 일원화**: ``mcp_handler`` 데코레이터로 14개 핸들러의
+  중복 예외 분기를 통합(약 -200줄). ``daemon status`` 는 raise-금지 특수동작 유지.
+- **daemon 상태 조회 facade**: ``infrastructure/daemon/status_reader.py`` 신설로
+  server/handlers 의 상태/pending 읽기 중복을 통합하고, adapters→infrastructure
+  직접 의존을 한 곳으로 집중(계층 경계 정리).
+- **서비스 응집도 개선**: ``suggest_classification`` 의 유사문서 조회 1회 공유,
+  ``ValidationService`` 검증 규칙을 선언적 테이블로, ``find_pending`` 을 4개
+  헬퍼로 분해 + 인덱스 read 1회 공유.
+
+### Fixed
+
+- **reindex 락 timeout 시 무보호 쓰기 제거**: 락 획득 실패 시 강행하지 않고
+  쓰기를 건너뛴다(``skipped="lock_timeout"``). LanceDB 매니페스트 race / JSON
+  부분 손상 위험 차단.
+- **graph.json 손상 복구**: ``load_graph_safely`` 로 JSONDecodeError / 키 누락
+  시 빈 그래프로 폴백 + 불완전 node/edge 필터. 손상된 그래프가 reindex/검증을
+  중단시키던 ``KeyError`` 제거.
+- **쿼리 캐시 동시성**: ``LRUQueryCache`` 에 락 추가(compute 는 락 밖, 히트/
+  eviction 은 락 안). FastMCP 다중 클라이언트 동시 요청 시 자료구조 손상 차단.
+- **LLM 재시도 backoff**: 시퀀스 소진 후 마지막 값만 반복하던 버그 수정 →
+  마지막 값을 2배씩 지수 확장.
+- **상태 파일 쓰기 실패 처리**: ``StatusFile._flush_locked`` 가 I/O 실패 시
+  잔여 ``.tmp`` 를 정리하고 원본을 보존.
+- **캐시 무효화 실패 가시화**: ``invalidate_all`` 실패가 DEBUG 로만 찍혀 무음
+  실패하던 것을 WARNING + daemon status 노출로 승격.
+- **watcher graceful shutdown**: 콜백 실행 중 stop/cancel 이 완료를 대기하고,
+  중지 후에는 콜백 진입을 차단. 백그라운드 reindex 가 shutdown 타임아웃을
+  초과하던 문제 해소.
+- **연결 안정성**: reindex ``Table already exists`` 회귀에 drop+create 폴백,
+  핸드셰이크 블로킹을 백그라운드 스레드로 분리, vault 경로 부재 시 친절 안내.
+- **예외 처리 강건화**: LLM classify 지수 backoff 재시도(CLI 미설치 제외),
+  ``gather(return_exceptions=True)`` 결과 검사, rescan/find_pending 침묵 제거 →
+  status ``last_error`` 노출, reindex 실패 → ``pending.jsonl`` 기록.
+- **ErrorContext.detail 안전 조회**: ``details`` 가 None 이어도 AttributeError
+  없이 조회하는 헬퍼 추가.
+
 ## [0.4.0] - 2026-05-31
 
 0.3.0 운영 보고서의 P0/P1/P2 일괄 해결. inbox 작성 중 분류 인터럽트(P0), 카테고리
