@@ -636,4 +636,51 @@ class TestExceptionHandling:
         data = json.loads(result)
 
         assert "error" in data
+
+
+class TestMcpHandlerDecorator:
+    """mcp_handler 데코레이터 예외→JSON 변환 5단계 검증 (동작 보존)."""
+
+    def _run(self, exc):
+        """search 핸들러에서 주어진 예외를 던지고 응답 dict 반환."""
+        container = _create_mock_container()
+        container.search_service.search.side_effect = exc
+        result = handle_wiki_search(container, query="x")
+        return json.loads(result)
+
+    def test_business_exception_returns_message(self):
+        data = self._run(BusinessException("biz problem"))
+        assert "biz problem" in data["error"]
+
+    def test_technical_exception_returns_message(self):
+        data = self._run(TechnicalException("tech problem"))
+        assert "tech problem" in data["error"]
+
+    def test_invalid_path_returns_message(self):
+        # InvalidPathError 는 TechnicalException 하위지만 메시지를 그대로 노출
+        data = self._run(InvalidPathError.of("../etc/passwd"))
+        assert "error" in data
+
+    def test_value_error_returns_message(self):
+        data = self._run(ValueError("bad value"))
+        assert "bad value" in data["error"]
+
+    def test_type_error_returns_message(self):
+        data = self._run(TypeError("bad type"))
+        assert "bad type" in data["error"]
+
+    def test_os_error_returns_generic_fs_message(self):
+        data = self._run(OSError("disk gone"))
+        # OSError 는 내부 경로 노출 방지 위해 고정 문구
+        assert data["error"] == "File system error"
+
+    def test_unexpected_exception_returns_internal_error(self):
+        data = self._run(RuntimeError("boom"))
         assert data["error"] == "Internal error"
+
+    def test_success_passthrough_unaffected(self):
+        """정상 경로는 데코레이터에 영향받지 않고 결과 반환."""
+        container = _create_mock_container()
+        result = handle_wiki_search(container, query="nginx")
+        data = json.loads(result)
+        assert "error" not in data
