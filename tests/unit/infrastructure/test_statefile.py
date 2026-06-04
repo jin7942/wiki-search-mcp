@@ -66,3 +66,43 @@ def test_atomic_write_no_partial_file(tmp_path: Path) -> None:
     t_r.join()
     t_w.join()
     assert errors == []
+
+
+def test_flush_failure_cleans_tmp_and_preserves_original(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """쓰기(os.replace) 실패 시 tmp 정리 + 원본 보존.
+
+    과거: _flush_locked 에 예외처리가 없어 디스크풀/권한 오류 시 orphan
+    .tmp 가 남았다. 이제 OSError 시 tmp 를 정리하고 원본은 직전 상태를
+    유지해야 한다.
+    """
+    import os as _os
+
+    target = tmp_path / "status.json"
+    sf = StatusFile(target)
+    sf.write({"v": 1})  # 정상 초기 상태
+
+    # os.replace 가 실패하도록 패치 (디스크풀/권한 오류 시뮬레이션)
+    real_replace = _os.replace
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "wiki_search_mcp.infrastructure.daemon.statefile.os.replace", boom
+    )
+
+    import pytest
+
+    with pytest.raises(OSError):
+        sf.write({"v": 2})
+
+    monkeypatch.setattr(
+        "wiki_search_mcp.infrastructure.daemon.statefile.os.replace", real_replace
+    )
+
+    # orphan .tmp 가 남지 않아야 함
+    assert not (tmp_path / "status.json.tmp").exists()
+    # 원본은 직전 정상 상태 유지
+    assert json.loads(target.read_text(encoding="utf-8")) == {"v": 1}

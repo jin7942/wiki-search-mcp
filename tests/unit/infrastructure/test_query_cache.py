@@ -3,6 +3,8 @@
 LRU 쿼리 캐시의 기능을 테스트합니다.
 """
 
+import threading
+
 import pytest
 
 from wiki_search_mcp.infrastructure.cache import LRUQueryCache
@@ -112,3 +114,77 @@ class TestLRUQueryCache:
 
         assert info["size"] == 1
         assert info["maxsize"] == 100
+
+
+class TestLRUQueryCacheConcurrency:
+    """동시 접근 안전성 테스트 (FastMCP 다중 클라이언트 시나리오)."""
+
+    def test_concurrent_access_no_corruption(self):
+        """다중 스레드 동시 접근 시 _cache/_order 손상 없음.
+
+        과거에는 락이 없어 _order.remove/append, pop(0)+del 사이에서
+        race 가 발생할 수 있었다. 락 도입 후에는 예외 없이 일관 상태를
+        유지해야 한다.
+        """
+        cache = LRUQueryCache(maxsize=50)
+        errors: list[Exception] = []
+
+        def worker(tid: int) -> None:
+            try:
+                for i in range(200):
+                    # 키 공간을 작게(0~99) 해 히트/미스/eviction 이 뒤섞이게 한다.
+                    key = f"k{i % 100}"
+                    cache.get_or_compute(key, lambda k: (float(len(k)),))
+            except Exception as e:  # noqa: BLE001 - 테스트에서 race 노출용
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"동시 접근 중 예외 발생: {errors}"
+        # 불변식: maxsize 초과 금지, _cache 와 _order 크기 일치.
+        assert cache.size <= 50
+        assert len(cache._cache) == len(cache._order)
+        assert set(cache._cache.keys()) == set(cache._order)
+
+    def test_compute_runs_outside_lock(self):
+        """compute_fn 실행 중 다른 스레드가 캐시에 접근 가능(락 점유 안 함).
+
+        느린 compute 가 락을 잡고 있으면 전체 검색이 직렬화된다. compute 는
+        락 밖에서 실행돼야 하므로, 한 키 계산이 진행 중이어도 다른 키의
+        캐시 히트는 즉시 반환돼야 한다.
+        """
+        cache = LRUQueryCache(maxsize=10)
+        cache.get_or_compute("fast", lambda k: (1.0,))  # 미리 캐싱
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_compute(k: str) -> tuple[float, ...]:
+            started.set()
+            release.wait(timeout=2.0)
+            return (9.0,)
+
+        slow_thread = threading.Thread(
+            target=lambda: cache.get_or_compute("slow", slow_compute)
+        )
+        slow_thread.start()
+        assert started.wait(timeout=2.0), "slow_compute 가 시작되지 않음"
+
+        # slow compute 가 진행 중인 동안 캐시 히트가 블록되지 않아야 함
+        hit_done = threading.Event()
+
+        def hit() -> None:
+            cache.get_or_compute("fast", lambda k: (1.0,))
+            hit_done.set()
+
+        hit_thread = threading.Thread(target=hit)
+        hit_thread.start()
+        assert hit_done.wait(timeout=1.0), "compute 중 캐시 히트가 블록됨(락 점유)"
+
+        release.set()
+        slow_thread.join(timeout=2.0)
+        hit_thread.join(timeout=2.0)

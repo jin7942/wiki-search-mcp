@@ -90,3 +90,30 @@ async def test_queue_full_increments_error_count() -> None:
         assert "error_count" in increments, (
             f"queue full 시 error_count 증가 안 됨: {increments}"
         )
+
+
+@pytest.mark.asyncio
+async def test_invalidate_all_failure_recorded_in_status() -> None:
+    """``invalidate_all`` 예외가 status 에 노출되어야 한다 (과거엔 DEBUG 무음).
+
+    무효화 실패 시 find_pending 이 stale 데이터를 반환할 수 있으므로
+    운영자가 daemon status 로 감지할 수 있어야 한다.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        wiki = Path(td) / "wiki"
+        (wiki / "pages").mkdir(parents=True)
+        runner, fake_container = _build_runner(wiki)
+        runner._status = MagicMock()
+        fake_container.invalidate_all.side_effect = RuntimeError("json corrupt")
+        # find_pending 은 정상 동작(빈 목록)해야 무효화 실패 경로만 검증됨
+        fake_container.classification_service.find_pending.return_value = []
+
+        await runner._rescan()
+
+        update_kwargs = {}
+        for c in runner._status.update.call_args_list:
+            update_kwargs.update(c.kwargs)
+        assert "last_invalidate_error" in update_kwargs, (
+            f"invalidate_all 실패가 status 에 기록 안 됨: {update_kwargs}"
+        )
+        assert "json corrupt" in update_kwargs["last_invalidate_error"]

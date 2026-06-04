@@ -247,8 +247,15 @@ class DaemonRunner:
         """pending 목록을 다시 가져와 큐에 추가 (중복은 inflight 집합으로 회피)."""
         try:
             self._container.invalidate_all()
-        except Exception:
-            logger.debug("invalidate_all() failed", exc_info=True)
+        except Exception as e:
+            # 캐시 무효화 실패 시 find_pending 이 stale 데이터를 반환할 수 있어
+            # 운영자가 반드시 알아야 한다. 과거에는 DEBUG 로만 찍혀(기본 INFO
+            # 레벨에서 안 보임) 무음 실패했다 → WARNING + status 노출로 승격.
+            logger.warning("invalidate_all() failed: %s", e, exc_info=True)
+            self._status.update(
+                last_invalidate_error=str(e),
+                last_invalidate_error_at=_utc_now(),
+            )
         # 인덱스 비어있을 수도 있음 — find_pending은 디스크 차집합도 함께 봄
         try:
             items = self._container.classification_service.find_pending(limit=200)

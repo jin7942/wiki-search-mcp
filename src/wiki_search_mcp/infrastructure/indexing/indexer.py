@@ -19,7 +19,12 @@ from wiki_search_mcp.core.config import DEFAULT_EMBEDDING_MODEL, WikiConfig
 from wiki_search_mcp.core.logging import get_logger
 from wiki_search_mcp.core.metrics import record
 from wiki_search_mcp.core.types import ConfidenceDict, FrontmatterDict
-from wiki_search_mcp.core.utils import parse_frontmatter, resolve_pages_path, tokenize
+from wiki_search_mcp.core.utils import (
+    load_graph_safely,
+    parse_frontmatter,
+    resolve_pages_path,
+    tokenize,
+)
 from wiki_search_mcp.infrastructure.daemon.paths import reindex_lock_file
 from wiki_search_mcp.infrastructure.daemon.pidfile import cross_process_lock
 from wiki_search_mcp.infrastructure.embedding.model_provider import get_model
@@ -313,7 +318,10 @@ class WikiIndexer:
         existing_graph: dict[str, Any] = {"nodes": [], "edges": []}
         graph_path = self.db_path / "graph.json"
         if not full and graph_path.exists():
-            existing_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            # 손상(부분쓰기/키누락) 시 빈 그래프로 폴백 → 증분이 안전하게
+            # 전체 재구축처럼 동작. 키 누락 항목은 로더가 걸러내므로
+            # 아래 n["id"]/e["source"] 접근은 KeyError 안전하다.
+            existing_graph = load_graph_safely(graph_path)
 
         # 기존 그래프를 path 기준으로 인덱싱
         existing_nodes: dict[str, dict] = {
@@ -468,13 +476,40 @@ class WikiIndexer:
         _write_start = time.perf_counter()
         with cross_process_lock(self._reindex_lock_path) as locked:
             if not locked:
-                # timeout: 다른 프로세스가 장시간 reindex 중. 강행하면 race 위험이
-                # 있으나, 끝내 못 쓰면 인덱스가 영영 갱신 안 되므로 경고 후 진행.
+                # timeout: 다른 프로세스가 장시간 reindex 중.
+                # 과거에는 경고 후 강행했으나, 그러면 이 블록의 쓰기 4종이
+                # 무보호로 실행돼 LanceDB 매니페스트 race / JSON 부분 손상
+                # 위험이 있었다(주석상 "전체가 flock 안"이 이 경로에서 거짓).
+                # 강행 대신 쓰기를 건너뛴다. 다른 프로세스가 reindex 중이므로
+                # 인덱스는 그쪽이 갱신하며, 우리가 놓친 변경분은 다음 reindex
+                # 또는 호출자의 pending 처리로 흡수된다. (영구 미갱신 우려는
+                # cross_process_lock 의 30s timeout 으로 정상 경로에선 거의
+                # 발생하지 않는다.)
                 logger.warning(
-                    "reindex lock timeout; proceeding without cross-process lock "
-                    "(another process may be reindexing): %s",
+                    "reindex lock timeout; skipping writes to avoid corruption "
+                    "(another process is reindexing): %s",
                     self._reindex_lock_path,
                 )
+                write_ms = round((time.perf_counter() - _write_start) * 1000, 1)
+                duration_ms = int((time.time() - start_time) * 1000)
+                record(
+                    "reindex",
+                    mode=mode,
+                    duration_ms=duration_ms,
+                    embed_ms=embed_ms,
+                    write_ms=write_ms,
+                    indexed=0,
+                    changed=len(texts_for_embedding),
+                    updated=0,
+                    deleted=0,
+                    skipped="lock_timeout",
+                )
+                return {
+                    "indexed": 0,
+                    "updated": 0,
+                    "duration_ms": duration_ms,
+                    "skipped": "lock_timeout",
+                }
 
             # LanceDB 테이블 생성/갱신.
             # ``mode="overwrite"`` 단일 호출이 정석이지만, lancedb 일부 버전

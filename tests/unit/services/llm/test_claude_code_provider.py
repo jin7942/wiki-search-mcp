@@ -179,3 +179,37 @@ async def test_cli_not_found_does_not_retry(monkeypatch: pytest.MonkeyPatch) -> 
         await provider.classify(_req())
     assert exc.value.context.code == "CLI_NOT_FOUND"
     assert calls["n"] == 1  # 재시도 안 함
+
+
+def test_backoff_sequence_then_exponential_extension() -> None:
+    """backoff 시퀀스 소진 후 마지막 값을 2배씩 지수 확장.
+
+    과거: min(attempt, len-1) 이라 (2,8) → 2, 8, 8, 8… (지수 깨짐).
+    수정: (2, 8) → 2, 8, 16, 32 (마지막 값 *2^overflow).
+    """
+    provider = ClaudeCodeProvider(
+        model="haiku", max_retries=4, retry_backoff_s=(2.0, 8.0)
+    )
+    assert provider._backoff_for(0) == 2.0
+    assert provider._backoff_for(1) == 8.0
+    assert provider._backoff_for(2) == 16.0  # 8 * 2^1
+    assert provider._backoff_for(3) == 32.0  # 8 * 2^2
+
+
+def test_backoff_empty_sequence_returns_zero() -> None:
+    """backoff 시퀀스가 비면 0초 (즉시 재시도)."""
+    provider = ClaudeCodeProvider(
+        model="haiku", max_retries=2, retry_backoff_s=()
+    )
+    assert provider._backoff_for(0) == 0.0
+    assert provider._backoff_for(5) == 0.0
+
+
+def test_backoff_single_element_extends() -> None:
+    """단일 원소 시퀀스도 지수 확장된다."""
+    provider = ClaudeCodeProvider(
+        model="haiku", max_retries=3, retry_backoff_s=(1.0,)
+    )
+    assert provider._backoff_for(0) == 1.0
+    assert provider._backoff_for(1) == 2.0  # 1 * 2^1
+    assert provider._backoff_for(2) == 4.0  # 1 * 2^2

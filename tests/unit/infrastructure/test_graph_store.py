@@ -141,3 +141,34 @@ class TestJsonGraphStoreEmpty:
         neighbors = store.get_neighbors("any.md")
 
         assert neighbors == []
+
+
+class TestJsonGraphStoreCorrupt:
+    """손상된 graph.json 강건성 (KeyError/JSONDecodeError 방지)."""
+
+    def test_corrupt_json_loads_empty(self, tmp_path):
+        """부분쓰기로 잘린 JSON → 예외 없이 빈 그래프."""
+        db_path = tmp_path / ".vectordb"
+        db_path.mkdir()
+        (db_path / "graph.json").write_text('{"nodes": [{"id"', encoding="utf-8")
+
+        store = JsonGraphStore(db_path)  # 예외 발생하면 실패
+        assert store.node_count == 0
+        assert store.edge_count == 0
+
+    def test_edge_missing_source_does_not_crash(self, tmp_path):
+        """source 누락 edge 가 있어도 인접리스트 구축이 죽지 않음."""
+        db_path = tmp_path / ".vectordb"
+        db_path.mkdir()
+        data = {
+            "nodes": [{"id": "a.md"}],
+            "edges": [
+                {"source": "a.md", "target": "b.md"},
+                {"target": "c.md"},  # source 누락 → 걸러져야 함
+            ],
+        }
+        (db_path / "graph.json").write_text(json.dumps(data), encoding="utf-8")
+
+        store = JsonGraphStore(db_path)  # 과거엔 edge["source"] 에서 KeyError
+        assert store.edge_count == 1
+        assert "b.md" in store.get_neighbors("a.md")

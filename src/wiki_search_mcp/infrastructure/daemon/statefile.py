@@ -64,13 +64,27 @@ class StatusFile:
             return dict(self._cache)
 
     def _flush_locked(self) -> None:
+        """tmp → fsync → replace 원자적 쓰기.
+
+        디스크 풀/권한 오류로 쓰기가 실패하면, 잔여 ``.tmp`` 를 정리한 뒤
+        예외를 올린다(writer.py 와 동일 패턴). 정리하지 않으면 orphan tmp
+        파일이 디스크에 남는다. 원본은 ``os.replace`` 전까지 건드리지 않으므로
+        실패해도 손상되지 않는다(이전 상태 유지).
+        """
         tmp = self._path.with_name(self._path.name + ".tmp")
         payload = json.dumps(self._cache, ensure_ascii=False, indent=2)
-        with open(tmp, "w", encoding="utf-8") as fp:
-            fp.write(payload)
-            fp.flush()
-            os.fsync(fp.fileno())
-        os.replace(tmp, self._path)
+        try:
+            with open(tmp, "w", encoding="utf-8") as fp:
+                fp.write(payload)
+                fp.flush()
+                os.fsync(fp.fileno())
+            os.replace(tmp, self._path)
+        except OSError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def clear(self) -> None:
         """상태 파일 삭제 (graceful shutdown 시)."""

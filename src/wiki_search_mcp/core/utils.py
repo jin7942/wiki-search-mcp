@@ -8,13 +8,17 @@ from __future__ import annotations
 - resolve_pages_path: pages 디렉토리 탐지
 """
 
+import json
 import re
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
 
+from wiki_search_mcp.core.logging import get_logger
 from wiki_search_mcp.core.types import FrontmatterDict
+
+logger = get_logger("utils")
 
 
 def tokenize(text: str) -> list[str]:
@@ -167,3 +171,51 @@ def resolve_pages_path(wiki_path: Path) -> Path:
     if pages_candidate.exists() and pages_candidate.is_dir():
         return pages_candidate
     return wiki_path
+
+
+def load_graph_safely(graph_path: Path) -> dict[str, Any]:
+    """graph.json 을 손상에 강건하게 로드한다.
+
+    graph.json 은 reindex 중 부분 쓰기, 수동 편집, 버전 불일치로 손상될 수
+    있다. 과거에는 ``json.loads`` 실패(JSONDecodeError)나 ``n["id"]`` /
+    ``e["source"]`` 키 누락(KeyError)이 reindex/검증 전체를 중단시켰다.
+    이 로더는:
+
+    - 파일이 없거나 JSON 파싱 실패 시 빈 그래프를 반환한다.
+    - nodes 는 ``id`` 키가 있는 dict 만, edges 는 ``source``/``target`` 키가
+      모두 있는 dict 만 통과시킨다(불완전 항목은 조용히 버린다).
+
+    이로써 손상 시 최악이라도 "그래프가 일부/전부 비는" 정도로 그치고,
+    증분 인덱싱은 자연히 전체 재구축처럼 동작한다(안전 폴백).
+
+    Args:
+        graph_path: graph.json 경로.
+
+    Returns:
+        ``{"nodes": [...], "edges": [...]}`` — 항상 유효한 형식.
+    """
+    empty: dict[str, Any] = {"nodes": [], "edges": []}
+    if not graph_path.exists():
+        return empty
+
+    try:
+        raw = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("graph.json 로드 실패, 빈 그래프로 폴백: %s (%s)", graph_path, e)
+        return empty
+
+    if not isinstance(raw, dict):
+        logger.warning("graph.json 형식 오류(최상위가 dict 아님), 빈 그래프로 폴백: %s", graph_path)
+        return empty
+
+    nodes = [
+        n
+        for n in raw.get("nodes", [])
+        if isinstance(n, dict) and "id" in n
+    ]
+    edges = [
+        e
+        for e in raw.get("edges", [])
+        if isinstance(e, dict) and "source" in e and "target" in e
+    ]
+    return {"nodes": nodes, "edges": edges}

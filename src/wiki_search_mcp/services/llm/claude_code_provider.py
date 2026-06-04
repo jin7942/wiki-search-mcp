@@ -98,6 +98,31 @@ class ClaudeCodeProvider:
                         text_parts.append(blk.text)
         return "".join(text_parts)
 
+    def _backoff_for(self, attempt: int) -> float:
+        """``attempt`` 번째 재시도 전 대기 초.
+
+        ``retry_backoff_s`` 시퀀스를 순서대로 사용하되, max_retries 가
+        시퀀스 길이보다 크면 마지막 값을 2배씩 지수 확장한다.
+
+        과거에는 ``min(attempt, len-1)`` 이라 시퀀스 소진 후 마지막 값만
+        반복돼(예: (2,8) 에서 8,8,8…) 지수 backoff 의도가 깨졌다. 이제
+        (2, 8) + max_retries=4 → 2, 8, 16, 32 로 정상 증가한다.
+
+        Args:
+            attempt: 0부터 시작하는 시도 인덱스.
+
+        Returns:
+            대기 초(>= 0).
+        """
+        seq = self._retry_backoff_s
+        if not seq:
+            return 0.0
+        if attempt < len(seq):
+            return seq[attempt]
+        # 시퀀스 소진: 마지막 값을 2^(초과분) 배로 확장.
+        overflow = attempt - (len(seq) - 1)
+        return seq[-1] * (2.0**overflow)
+
     async def classify(self, req: ClassificationRequest) -> ClassificationDecision:
         prompt = build_user_prompt(req)
 
@@ -139,9 +164,7 @@ class ClaudeCodeProvider:
 
             # 여기 도달 = transient 실패. 남은 시도가 있으면 backoff 후 재시도.
             if attempt < attempts - 1:
-                backoff = self._retry_backoff_s[
-                    min(attempt, len(self._retry_backoff_s) - 1)
-                ]
+                backoff = self._backoff_for(attempt)
                 logger.warning(
                     "LLM classify transient failure (%s), retry %d/%d after %.1fs: %s",
                     getattr(last_err.context, "code", "?") if last_err.context else "?",

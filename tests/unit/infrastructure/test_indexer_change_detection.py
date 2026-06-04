@@ -122,3 +122,39 @@ class TestIncrementalReindexHash:
         assert "mtime" in entry
         assert "hash" in entry
         assert len(entry["hash"]) == 64  # sha256 hex
+
+
+class TestReindexLockTimeout:
+    """락 timeout 시 쓰기 skip (무보호 쓰기로 인한 손상 방지)."""
+
+    def test_lock_timeout_skips_writes(self, tmp_path, monkeypatch):
+        """cross_process_lock 이 실패(False)하면 쓰기를 건너뛰고 skipped 반환.
+
+        과거에는 경고 후 강행해 LanceDB/JSON 무보호 쓰기 → 손상 위험.
+        이제는 쓰기를 전혀 수행하지 않고 조기 반환해야 한다.
+        """
+        from contextlib import contextmanager
+
+        indexer, wiki = _make_indexer(tmp_path)
+        (wiki / "pages" / "doc.md").write_text(
+            "---\ntitle: D\n---\nbody", encoding="utf-8"
+        )
+
+        # 락을 항상 실패(False)로 만든다.
+        @contextmanager
+        def fake_lock(*args, **kwargs):
+            yield False
+
+        monkeypatch.setattr(
+            "wiki_search_mcp.infrastructure.indexing.indexer.cross_process_lock",
+            fake_lock,
+        )
+
+        result = indexer.reindex(full=False)
+
+        assert result.get("skipped") == "lock_timeout"
+        assert result["indexed"] == 0
+        assert result["updated"] == 0
+        # 쓰기를 건너뛰었으므로 인덱스 산출물이 생성되지 않아야 한다.
+        assert not (indexer.db_path / "graph.json").exists()
+        assert not (indexer.db_path / "bm25_index.json").exists()

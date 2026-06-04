@@ -12,12 +12,11 @@ graph.json 파일에서 wikilink 그래프를 관리합니다.
 
 from __future__ import annotations
 
-import json
 from collections import deque
 from pathlib import Path
 from typing import Any
 
-from wiki_search_mcp.core.utils import normalize_document_path
+from wiki_search_mcp.core.utils import load_graph_safely, normalize_document_path
 
 
 class JsonGraphStore:
@@ -45,12 +44,11 @@ class JsonGraphStore:
     def _load(self) -> None:
         """graph.json 로드 + 인접 리스트 캐싱."""
         graph_path = self._db_path / "graph.json"
-        if graph_path.exists():
-            self._graph = json.loads(graph_path.read_text(encoding="utf-8"))
-            self._neighbors = self._build_adjacency_list(self._graph)
-        else:
-            self._graph = {"nodes": [], "edges": []}
-            self._neighbors = {}
+        # 손상(부분쓰기/키누락) 시 빈 그래프로 폴백. edges 는 source/target 이
+        # 모두 있는 항목만 통과하므로 _build_adjacency_list 의 edge["source"]
+        # 접근이 KeyError 안전하다.
+        self._graph = load_graph_safely(graph_path)
+        self._neighbors = self._build_adjacency_list(self._graph)
 
     def _build_adjacency_list(self, graph: dict[str, Any]) -> dict[str, set[str]]:
         """양방향 인접 리스트 구축.
