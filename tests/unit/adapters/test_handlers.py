@@ -426,9 +426,13 @@ class TestHandleWikiSuggestTags:
         assert "error" in data
 
     def test_document_not_found(self):
-        """문서 없을 때 에러 반환."""
+        """문서 없을 때 에러 반환 (service 가 DocumentNotFoundError raise)."""
+        from wiki_search_mcp.core.exceptions import DocumentNotFoundError
+
         container = _create_mock_container()
-        container.document_service.get_document.return_value = None
+        container.document_service.suggest_tags.side_effect = (
+            DocumentNotFoundError.of("nonexistent.md")
+        )
 
         result = handle_wiki_suggest_tags(container, path="nonexistent.md")
         data = json.loads(result)
@@ -436,23 +440,22 @@ class TestHandleWikiSuggestTags:
         assert "error" in data
         assert "not found" in data["error"].lower()
 
-    def test_top_n_clamped(self):
-        """top_n 범위 제한 (1-10)."""
+    def test_delegates_to_service_with_clamped_top_n(self):
+        """handler 는 검증 후 service.suggest_tags 에 위임한다."""
         container = _create_mock_container()
-        mock_doc = MagicMock()
-        mock_doc.tags = ("existing",)
-        container.document_service.get_document.return_value = mock_doc
-        container.document_service.read_content.return_value = {
-            "content": "Some content about nginx and ssl"
+        container.document_service.suggest_tags.return_value = {
+            "path": "test.md",
+            "suggested_tags": ["nginx", "ssl"],
+            "existing_tags": ["existing"],
         }
 
-        # 함수 내부에서 AutoTagger를 import하므로 모듈 존재 확인
-        # 실제 태그 추출은 통합 테스트에서 확인
         result = handle_wiki_suggest_tags(container, path="test.md", top_n=15)
-        # top_n이 10으로 조정되어도 결과는 반환됨
         data = json.loads(result)
-        # 에러가 없으면 성공 (AutoTagger가 동작)
-        assert "path" in data or "error" in data
+
+        assert data["suggested_tags"] == ["nginx", "ssl"]
+        # top_n 은 10 으로 clamp 되어 service 에 전달돼야 함
+        _, kwargs = container.document_service.suggest_tags.call_args
+        assert kwargs["top_n"] == 10
 
 
 class TestHandleWikiGetCategories:

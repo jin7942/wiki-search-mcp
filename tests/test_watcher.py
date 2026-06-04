@@ -156,6 +156,82 @@ class TestDebouncedReindexHandler:
 
         assert call_count == 0
 
+    def test_cancel_waits_for_running_callback(self):
+        """콜백 실행 중 cancel()은 완료를 기다린다(graceful shutdown).
+
+        과거: 타이머 발화 후 _timer=None 이 되면 cancel 이 무효라 콜백이
+        백그라운드에서 계속 실행됐다. 이제 cancel 이 진행 중 콜백 완료를
+        대기해야 한다.
+        """
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def slow_callback():
+            started.set()
+            release.wait(timeout=2.0)
+            finished.set()
+
+        handler = DebouncedReindexHandler(
+            reindex_callback=slow_callback,
+            debounce_seconds=0.1,
+        )
+
+        class MockEvent:
+            is_directory = False
+            src_path = "/tmp/test.md"
+            event_type = "modified"
+
+        handler.on_any_event(MockEvent())
+        assert started.wait(timeout=2.0), "콜백이 시작되지 않음"
+
+        # 콜백 실행 중 cancel 호출 → 별도 스레드에서 (블로킹되므로)
+        cancel_returned = threading.Event()
+
+        def do_cancel():
+            handler.cancel(wait_timeout=2.0)
+            cancel_returned.set()
+
+        t = threading.Thread(target=do_cancel)
+        t.start()
+
+        # 콜백이 아직 안 끝났으므로 cancel 은 리턴하지 않아야 함
+        time.sleep(0.2)
+        assert not cancel_returned.is_set(), "cancel 이 콜백 완료를 기다리지 않음"
+
+        # 콜백 완료시키기
+        release.set()
+        assert cancel_returned.wait(timeout=2.0), "cancel 이 끝내 리턴 안 함"
+        assert finished.is_set()
+        t.join(timeout=2.0)
+
+    def test_no_callback_after_stopping(self):
+        """cancel(중지요청) 후 발화하는 타이머는 콜백을 실행하지 않는다."""
+        call_count = 0
+
+        def callback():
+            nonlocal call_count
+            call_count += 1
+
+        handler = DebouncedReindexHandler(
+            reindex_callback=callback,
+            debounce_seconds=0.3,
+        )
+
+        class MockEvent:
+            is_directory = False
+            src_path = "/tmp/test.md"
+            event_type = "modified"
+
+        handler.on_any_event(MockEvent())
+        time.sleep(0.05)
+        handler.cancel()  # _stopping set
+
+        # 중지 후 새 이벤트가 와도 예약/실행되지 않아야 함
+        handler.on_any_event(MockEvent())
+        time.sleep(0.5)
+        assert call_count == 0
+
 
 class TestWikiWatcher:
     """WikiWatcher 테스트."""

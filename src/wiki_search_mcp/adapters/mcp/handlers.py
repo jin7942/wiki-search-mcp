@@ -520,39 +520,12 @@ def handle_wiki_suggest_tags(
     Returns:
         제안 태그 JSON 문자열
     """
-    validated_path = validate_path_required(path)
+    # 입력 검증 후 service 에 위임(태그 추출 유스케이스는 service 책임).
+    validate_path_required(path)
     top_n = validate_top_k(top_n, max_val=10)
 
-    # 문서 조회 (본문 포함)
-    doc = container.document_service.get_document(
-        path=validated_path,
-        include_content=True,
-    )
-
-    if doc is None:
-        return _json_error(f"Document not found: {path}")
-
-    # 본문 읽기
-    content_info = container.document_service.read_content(
-        path=validated_path,
-        include_full=True,
-    )
-
-    content = content_info.get("content", "")
-    if not content:
-        return _json_error("Document has no content")
-
-    # 자동 태그 추출
-    from wiki_search_mcp.services.tagger_service import AutoTagger
-
-    tagger = AutoTagger()
-    suggested_tags = tagger.extract_tags(content, top_n)
-
-    return _json_response({
-        "path": validated_path,
-        "suggested_tags": suggested_tags,
-        "existing_tags": list(doc.tags),
-    })
+    result = container.document_service.suggest_tags(path, top_n=top_n)
+    return _json_response(result)
 
 
 # =============================================================================

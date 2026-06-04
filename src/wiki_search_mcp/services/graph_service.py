@@ -117,5 +117,12 @@ class GraphService:
         return neighbors[:limit]
 
     def _validate_path(self, path: str) -> None:
-        """경로 유효성 검사. ``path_validator``로 위임해 reason 분기를 일관되게 사용."""
+        """경로 유효성 검사(검증 전용, 정규화/반환 없음).
+
+        DocumentService._validate_path 와 달리 .md 정규화나 반환값이 없다.
+        이는 의도된 차이다: 그래프 조회(get_backlinks/get_neighbors)는
+        GraphRepository 내부에서 normalize_document_path 로 .md 유무 양쪽을
+        매칭하므로(graph_store.get_backlinks 참고), 서비스 계층에서 다시
+        정규화할 필요가 없다. 여기서는 path traversal 등 보안 검증만 수행한다.
+        """
         validate_path_for_query(path)

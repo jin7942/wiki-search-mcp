@@ -171,6 +171,46 @@ class DocumentService:
         # limit 적용 및 Document 변환
         return [Document.from_dict(doc_data) for doc_data in filtered_docs[:limit]]
 
+    def suggest_tags(self, path: str, top_n: int = 5) -> dict[str, Any]:
+        """문서 본문 기반 태그 제안.
+
+        adapter(handler)가 AutoTagger 를 직접 인스턴스화하던 것을 service 로
+        옮긴 것이다(계층 경계 정리). 문서 조회 → 본문 읽기 → 태그 추출까지
+        한 유스케이스로 캡슐화한다.
+
+        Args:
+            path: 대상 문서 경로(검증/정규화 전).
+            top_n: 추출할 태그 수.
+
+        Returns:
+            ``{"path", "suggested_tags", "existing_tags"}`` dict.
+
+        Raises:
+            DocumentNotFoundError: 문서가 없거나 본문이 비어 있는 경우.
+            InvalidPathError: 경로 검증 실패.
+        """
+        from wiki_search_mcp.services.tagger_service import AutoTagger
+
+        validated_path = self._validate_path(path)
+
+        doc = self.get_document(path=validated_path, include_content=True)
+        if doc is None:
+            raise DocumentNotFoundError.of(path)
+
+        content_info = self.read_content(path=validated_path, include_full=True)
+        content = content_info.get("content", "")
+        if not content:
+            raise DocumentNotFoundError.of(f"{path} (no content)")
+
+        tagger = AutoTagger()
+        suggested_tags = tagger.extract_tags(content, top_n)
+
+        return {
+            "path": validated_path,
+            "suggested_tags": suggested_tags,
+            "existing_tags": list(doc.tags),
+        }
+
     def get_similar(self, path: str, top_k: int = 5) -> list[Document]:
         """특정 문서와 유사한 문서 목록.
 

@@ -44,10 +44,18 @@ class DebouncedReindexHandler(FileSystemEventHandler):
         self.debounce_seconds = debounce_seconds
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
+        # 중지 요청 플래그: set 이면 타이머가 발화해도 콜백을 실행하지 않는다.
+        self._stopping = threading.Event()
+        # 콜백 실행 중 표시: cancel()/stop() 이 진행 중 콜백 완료를 대기할 수 있다.
+        self._idle = threading.Event()
+        self._idle.set()  # 초기 상태: 실행 중 아님
 
     def _schedule_reindex(self) -> None:
         """타이머 리셋 후 reindex 예약."""
         with self._lock:
+            # 중지 중이면 새 예약을 하지 않는다.
+            if self._stopping.is_set():
+                return
             if self._timer is not None:
                 self._timer.cancel()
 
@@ -62,12 +70,21 @@ class DebouncedReindexHandler(FileSystemEventHandler):
         """reindex 콜백 실행."""
         with self._lock:
             self._timer = None
+            # 중지 요청됐으면 콜백 자체를 실행하지 않는다(stop 중 불필요한
+            # 장시간 reindex 진입 방지).
+            if self._stopping.is_set():
+                return
+            # 콜백 시작 — idle 해제(실행 중 표시).
+            self._idle.clear()
 
         logger.info("Auto-reindex triggered")
         try:
             self.reindex_callback()
         except Exception as e:
             logger.error(f"Auto-reindex failed: {e}")
+        finally:
+            # 콜백 종료 — stop()/cancel() 이 대기 중이면 깨운다.
+            self._idle.set()
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         """파일시스템 이벤트 처리.
@@ -92,12 +109,30 @@ class DebouncedReindexHandler(FileSystemEventHandler):
             logger.debug(f"File {event.event_type}: {src_path}")
             self._schedule_reindex()
 
-    def cancel(self) -> None:
-        """대기 중인 타이머 취소."""
+    def cancel(self, *, wait_timeout: float = 5.0) -> None:
+        """대기 중인 타이머 취소 + 진행 중 콜백 완료 대기.
+
+        타이머 발화 직후(``_timer=None``)부터 콜백 실행 중인 구간에서는
+        타이머 cancel 만으로는 콜백을 막을 수 없다. 그래서:
+
+        1. ``_stopping`` 을 set 해 아직 발화 안 한 타이머가 콜백을 실행하지
+           않도록 한다.
+        2. 대기 중 타이머가 있으면 cancel.
+        3. 이미 콜백이 실행 중이면 ``wait_timeout`` 까지 완료를 기다린다
+           (graceful shutdown 이 백그라운드 reindex 와 겹치지 않게).
+
+        Args:
+            wait_timeout: 진행 중 콜백 완료를 기다릴 최대 초.
+        """
         with self._lock:
+            self._stopping.set()
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+
+        # 락 밖에서 대기(콜백이 _execute_reindex 안에서 _idle.set 하므로
+        # 락을 잡은 채 기다리면 데드락).
+        self._idle.wait(timeout=wait_timeout)
 
 
 class WikiWatcher:
