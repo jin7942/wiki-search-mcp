@@ -25,6 +25,24 @@ class ErrorContext:
     code: str
     details: dict[str, Any] | None = None
 
+    def detail(self, key: str, default: Any = None) -> Any:
+        """``details`` 에서 안전하게 값 조회.
+
+        ``details`` 가 ``None`` 일 수 있으므로 ``ctx.details.get(key)`` 는
+        AttributeError 위험이 있다. 이 헬퍼로 None 여부를 신경 쓰지 않고
+        조회한다.
+
+        Args:
+            key: 조회할 키.
+            default: 키가 없거나 details 가 None 일 때 반환값.
+
+        Returns:
+            값 또는 default.
+        """
+        if self.details is None:
+            return default
+        return self.details.get(key, default)
+
 
 class WikiSearchError(Exception):
     """Base exception for wiki-search-mcp.

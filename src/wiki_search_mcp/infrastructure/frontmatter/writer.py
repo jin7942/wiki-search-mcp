@@ -71,10 +71,13 @@ def _atomic_write(target: Path, content: str) -> None:
         raise
 
 
-def _decide_target_path(
+def decide_target_path(
     rel_path: str, category: str, subcategory: str | None = None
 ) -> str:
-    """카테고리(+서브카테고리) 폴더로 이동할 새 상대 경로 결정.
+    """카테고리(+서브카테고리) 폴더로 이동할 새 상대 경로 결정 (public).
+
+    순수 함수다. writer 내부뿐 아니라 ReclassificationService 도 재배치 경로
+    계산에 재사용하므로 public API 로 노출한다.
 
     - ``subcategory`` 가 주어지면 목적지는 ``<category>/<subcategory>/<basename>``.
     - 그렇지 않고 첫 컴포넌트가 이미 ``category`` 면 원경로 유지.
@@ -94,6 +97,10 @@ def _decide_target_path(
     if parts and parts[0] == category:
         return rel_path
     return str(Path(category) / basename)
+
+
+# 하위호환 별칭(기존 테스트/내부 호출이 _decide_target_path 사용).
+_decide_target_path = decide_target_path
 
 
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")

@@ -679,7 +679,7 @@ def _acquire_watcher_lock(wiki_path: Path) -> bool:
     try:
         lock.acquire()
     except DaemonError as e:
-        existing = e.context.details.get("pid") if e.context else None
+        existing = e.context.detail("pid") if e.context else None
         logger.info(
             "another wiki-search serve owns the watcher for this vault "
             "(pid=%s); running in search-only mode (no watcher)",

@@ -36,6 +36,22 @@ class TestErrorContext:
         with pytest.raises(Exception):
             ctx.code = "CHANGED"
 
+    def test_detail_returns_value(self):
+        """detail()로 details 값 조회."""
+        ctx = ErrorContext(code="T", details={"pid": 1234})
+        assert ctx.detail("pid") == 1234
+
+    def test_detail_none_details_returns_default(self):
+        """details 가 None 이어도 AttributeError 없이 default 반환."""
+        ctx = ErrorContext(code="T")  # details=None
+        assert ctx.detail("pid") is None
+        assert ctx.detail("pid", -1) == -1
+
+    def test_detail_missing_key_returns_default(self):
+        """없는 키는 default 반환."""
+        ctx = ErrorContext(code="T", details={"a": 1})
+        assert ctx.detail("b", "fallback") == "fallback"
+
 
 class TestExceptionHierarchy:
     """예외 계층 구조 테스트."""

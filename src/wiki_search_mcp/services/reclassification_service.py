@@ -17,7 +17,7 @@ LLM 이 화이트리스트에 맞는 subcategory 를 산출하면 ``<category>/<
 요요/무한루프 방지:
 - ``_collect_flat_candidates`` 가 ``len(parts) != 2`` 로 이미 서브폴더 안에 있는
   파일을 후보에서 제외 → 옮긴 직후 재방문 불가 (1차 방어선).
-- ``_decide_target_path`` 가 목적지 == 현재 위치면 이동 안 함 (2차 방어선).
+- ``decide_target_path`` 가 목적지 == 현재 위치면 이동 안 함 (2차 방어선).
 - 일회성 배치라 daemon 의 ``_periodic_rescan`` 처럼 영구 재큐잉되지 않는다.
 """
 
@@ -31,7 +31,7 @@ from wiki_search_mcp.core.config import is_staging_folder
 from wiki_search_mcp.core.exceptions import ClassifierError, DocumentNotFoundError
 from wiki_search_mcp.infrastructure.frontmatter.writer import (
     FrontmatterWriter,
-    _decide_target_path,
+    decide_target_path,
 )
 from wiki_search_mcp.infrastructure.jsonl.log import JsonlLog
 from wiki_search_mcp.services.classifier_service import ClassifierSkipped
@@ -171,7 +171,7 @@ class ReclassificationService:
                 continue
 
             # 요요 2차 방어선: 목적지가 현재 위치와 같으면 이동 안 함.
-            target = _decide_target_path(rel, decision.category, decision.subcategory)
+            target = decide_target_path(rel, decision.category, decision.subcategory)
             if target == rel:
                 results.append({"path": rel, "status": "already_placed"})
                 continue
