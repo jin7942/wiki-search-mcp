@@ -6,7 +6,8 @@ frontmatter 필수 필드 누락, 깨진 wikilink 등을 감지합니다.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable
 
 from wiki_search_mcp.core.config import (
     MAX_DOCS_LIMIT,
@@ -19,6 +20,54 @@ from wiki_search_mcp.core.utils import normalize_document_path
 
 if TYPE_CHECKING:
     from wiki_search_mcp.core.protocols import GraphRepository, VectorRepository
+
+
+@dataclass(frozen=True)
+class _FieldRule:
+    """문서 frontmatter 필드 검증 규칙(선언적).
+
+    규칙을 메서드 본문에 흩뿌리는 대신 한 테이블에 모아, 새 규칙 추가 시
+    테이블에 한 줄만 더하면 되도록 한다.
+
+    Attributes:
+        issue_type: 누락 시 기록할 issue type(예: "missing_title"). stats 키와
+            일치해야 통계에 집계된다. ``None`` 이면 issue 를 만들지 않고
+            누락 카운트만 올린다(created/updated 처럼 통계 전용).
+        message: issue 메시지.
+        is_missing: doc 을 받아 "누락이면 True" 를 반환하는 술어.
+    """
+
+    issue_type: str | None
+    message: str
+    is_missing: Callable[[dict[str, Any]], bool]
+
+
+def _title_missing(doc: dict[str, Any]) -> bool:
+    """title 이 없거나 path/파일명과 동일하면 누락으로 간주."""
+    path = doc["path"]
+    title = doc.get("title", "")
+    path_stem = path[:-3] if path.endswith(".md") else path
+    return not title or title == path or title == path_stem
+
+
+def _confidence_missing(doc: dict[str, Any]) -> bool:
+    """confidence 점수 0 + 레벨 low 면 frontmatter 미작성으로 본다."""
+    return (
+        doc.get("confidence_score", 50) == 0
+        and doc.get("confidence_level", "medium") == "low"
+    )
+
+
+# 필드 검증 규칙 테이블. 순서대로 평가하며, 새 규칙은 여기에 한 줄 추가하면 된다.
+_FIELD_RULES: tuple[_FieldRule, ...] = (
+    _FieldRule("missing_title", "title 필드 없음", _title_missing),
+    _FieldRule("missing_state", "state 필드 없음", lambda d: not d.get("state", "")),
+    _FieldRule("missing_tags", "tags 필드 없음", lambda d: not d.get("tags", [])),
+    _FieldRule("missing_confidence", "confidence 필드 없음", _confidence_missing),
+    # created/updated 는 통계(누락 카운트)에만 반영하고 issue 는 만들지 않는다.
+    _FieldRule(None, "", lambda d: not d.get("created", "")),
+    _FieldRule(None, "", lambda d: not d.get("updated", "")),
+)
 
 
 class ValidationService:
@@ -124,45 +173,15 @@ class ValidationService:
         path = doc["path"]
         missing_count = 0
 
-        # title 검사 (path와 동일하면 누락으로 간주)
-        title = doc.get("title", "")
-        path_stem = path[:-3] if path.endswith(".md") else path
-        if not title or title == path or title == path_stem:
-            issues.append(
-                ValidationIssue.of(path, "missing_title", "title 필드 없음")
-            )
-            missing_count += 1
-
-        # state 검사
-        state = doc.get("state", "")
-        if not state:
-            issues.append(
-                ValidationIssue.of(path, "missing_state", "state 필드 없음")
-            )
-            missing_count += 1
-
-        # tags 검사
-        tags = doc.get("tags", [])
-        if not tags:
-            issues.append(
-                ValidationIssue.of(path, "missing_tags", "tags 필드 없음")
-            )
-            missing_count += 1
-
-        # confidence 검사
-        confidence_score = doc.get("confidence_score", 50)
-        confidence_level = doc.get("confidence_level", "medium")
-        if confidence_score == 0 and confidence_level == "low":
-            issues.append(
-                ValidationIssue.of(path, "missing_confidence", "confidence 필드 없음")
-            )
-            missing_count += 1
-
-        # created/updated 검사 (통계용, 이슈는 생성 안 함)
-        if not doc.get("created", ""):
-            missing_count += 1
-        if not doc.get("updated", ""):
-            missing_count += 1
+        # 선언적 규칙 테이블 순회. issue_type 이 None 인 규칙(created/updated)은
+        # 통계 누락 카운트만 올리고 issue 는 만들지 않는다.
+        for rule in _FIELD_RULES:
+            if rule.is_missing(doc):
+                missing_count += 1
+                if rule.issue_type is not None:
+                    issues.append(
+                        ValidationIssue.of(path, rule.issue_type, rule.message)
+                    )
 
         return issues, missing_count
 

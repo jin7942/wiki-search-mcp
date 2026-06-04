@@ -273,6 +273,34 @@ def test_suggest_classification_uses_similar_for_voting(
     assert "infra" in suggestion.category_candidates
 
 
+def test_suggest_classification_calls_get_similar_once(
+    wiki_path: Path, matcher: IgnoreMatcher
+):
+    """유사 문서 조회는 1번만 (카테고리 투표 + 유사경로 표시 공유).
+
+    과거엔 _compute_category_candidates 와 _compute_similar_paths 가 각각
+    get_similar 를 호출해 동일 검색을 2번 수행했다.
+    """
+    (wiki_path / "target.md").write_text("# T\n본문", encoding="utf-8")
+    similar = [
+        Document.from_dict({"path": "infra/a.md", "category": "infra", "title": "A"}),
+    ]
+    listing = CategoryListing.of(
+        mode="folder", categories=["infra"], detected_at="now"
+    )
+    svc = _make_classification_service(
+        wiki_path, matcher, indexed_docs=[], similar_docs=similar, listing=listing
+    )
+
+    suggestion = svc.suggest_classification("target.md")
+
+    # 동작 보존: 카테고리 투표 + 유사경로 둘 다 반영
+    assert "infra" in suggestion.category_candidates
+    assert "infra/a.md" in suggestion.similar_paths
+    # 검색은 1회만
+    assert svc._document_service.get_similar.call_count == 1
+
+
 def test_suggest_classification_raises_on_missing(wiki_path: Path, matcher: IgnoreMatcher):
     """파일이 디스크/인덱스 모두 없으면 예외."""
     svc = _make_classification_service(wiki_path, matcher, indexed_docs=[])

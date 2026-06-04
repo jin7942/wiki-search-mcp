@@ -100,71 +100,82 @@ class ClassificationService:
         if self._is_cache_valid():
             return (self._cached_pending or [])[:limit]
 
-        items: list[PendingItem] = []
+        # 인덱스를 한 번만 읽어 1차/2차에서 공유(과거엔 to_arrow_list 2회 호출).
+        indexed_docs = self._read_indexed_docs()
+        indexed_paths = {(d.get("path") or "").strip() for d in indexed_docs}
+
         seen_paths: set[str] = set()
+        items: list[PendingItem] = []
+        items.extend(self._pending_from_index(indexed_docs, seen_paths))
+        items.extend(self._pending_from_disk(indexed_paths, seen_paths))
 
-        # 1차: 인덱스 기반 추출
-        if self._vector.exists():
-            try:
-                docs = self._vector.to_arrow_list()
-            except Exception as e:
-                logger.warning(f"Failed to read vector index: {e}")
-                docs = []
+        self._sort_pending(items)
 
-            for doc in docs:
-                path = (doc.get("path") or "").strip()
-                if not path or path in seen_paths:
-                    continue
+        # 캐시 갱신
+        self._cached_pending = items
+        self._cached_at = self._clock()
 
-                # staging 폴더(inbox 변형) 안의 파일은 frontmatter 상태와 무관하게
-                # 항상 분류 대상. category="infra" 같은 값이 박혀있어도 daemon이
-                # 다시 큐잉해서 적절한 카테고리 폴더로 이동시켜야 한다.
-                first = path.split("/", 1)[0] if "/" in path else ""
-                if first and is_staging_folder(first):
-                    full_path = self._pages_path / path
-                    items.append(
-                        PendingItem.of(
-                            path=path, reason="in_staging", mtime=_format_mtime(full_path)
-                        )
-                    )
-                    seen_paths.add(path)
-                    continue
+        return items[:limit]
 
+    def _read_indexed_docs(self) -> list[dict]:
+        """인덱스 문서 목록(실패/미존재 시 빈 리스트)."""
+        if not self._vector.exists():
+            return []
+        try:
+            return self._vector.to_arrow_list()
+        except Exception as e:
+            logger.warning(f"Failed to read vector index: {e}")
+            return []
+
+    def _pending_from_index(
+        self, indexed_docs: list[dict], seen_paths: set[str]
+    ) -> list[PendingItem]:
+        """1차: 인덱스에서 분류 부족 문서 추출.
+
+        staging 폴더 파일은 frontmatter 상태와 무관하게 항상 pending(daemon 이
+        카테고리 폴더로 다시 이동시켜야 함). 그 외엔 category/tags 부족만.
+        ``seen_paths`` 에 처리한 경로를 누적해 2차와 중복을 막는다.
+        """
+        items: list[PendingItem] = []
+        for doc in indexed_docs:
+            path = (doc.get("path") or "").strip()
+            if not path or path in seen_paths:
+                continue
+
+            first = path.split("/", 1)[0] if "/" in path else ""
+            if first and is_staging_folder(first):
+                reason: str | None = "in_staging"
+            else:
                 category = (doc.get("category") or "").strip()
                 tags = doc.get("tags") or []
-
                 reason = self._categorize_indexed_doc(category, tags)
                 if reason is None:
                     continue
 
-                full_path = self._pages_path / path
-                items.append(
-                    PendingItem.of(path=path, reason=reason, mtime=_format_mtime(full_path))
-                )
-                seen_paths.add(path)
+            full_path = self._pages_path / path
+            items.append(
+                PendingItem.of(path=path, reason=reason, mtime=_format_mtime(full_path))
+            )
+            seen_paths.add(path)
+        return items
 
-        # 2차: 인덱스에 없는 신규 파일
+    def _pending_from_disk(
+        self, indexed_paths: set[str], seen_paths: set[str]
+    ) -> list[PendingItem]:
+        """2차: 인덱스에 없는 신규 디스크 파일(+ staging 은 항상 포함)."""
         try:
             disk_files = self._scan_disk_files()
         except OSError as e:
             logger.warning(f"Failed to scan disk: {e}")
-            disk_files = []
+            return []
 
-        # 인덱싱된 경로 집합
-        indexed_paths: set[str] = set()
-        if self._vector.exists():
-            try:
-                indexed_paths = {(d.get("path") or "").strip() for d in self._vector.to_arrow_list()}
-            except Exception:
-                indexed_paths = set()
-
+        items: list[PendingItem] = []
         for rel_path in disk_files:
             if rel_path in seen_paths:
                 continue
             first = rel_path.split("/", 1)[0] if "/" in rel_path else ""
             is_staging = bool(first) and is_staging_folder(first)
-            # staging 파일은 인덱스 유무와 무관하게 항상 pending으로 노출.
-            # 인덱스에 있어도 daemon이 다시 분류해 카테고리 폴더로 이동시켜야 함.
+            # staging 파일은 인덱스 유무와 무관하게 항상 노출.
             if not is_staging and rel_path in indexed_paths:
                 continue
             full_path = self._pages_path / rel_path
@@ -173,9 +184,11 @@ class ClassificationService:
                 PendingItem.of(path=rel_path, reason=reason, mtime=_format_mtime(full_path))
             )
             seen_paths.add(rel_path)
+        return items
 
-        # 정렬: in_staging → not_indexed → no_frontmatter → no_category,
-        # 같은 reason은 path 사전순
+    @staticmethod
+    def _sort_pending(items: list[PendingItem]) -> None:
+        """in_staging → not_indexed → no_frontmatter → no_category, 동일 reason 은 path 순."""
         reason_order = {
             "in_staging": 0,
             "not_indexed": 1,
@@ -183,12 +196,6 @@ class ClassificationService:
             "no_category": 3,
         }
         items.sort(key=lambda it: (reason_order.get(it.reason, 9), it.path))
-
-        # 캐시 갱신
-        self._cached_pending = items
-        self._cached_at = self._clock()
-
-        return items[:limit]
 
     def suggest_classification(self, path: str) -> ClassificationSuggestion:
         """단일 파일에 대한 카테고리/태그 추천.
@@ -204,30 +211,20 @@ class ClassificationService:
             DocumentNotFoundError: 파일이 디스크에도 인덱스에도 없음
         """
         normalized = validate_path(path, self._pages_path)
+        content = self._load_content(normalized)
 
-        full_path = self._pages_path / normalized
-        if not full_path.exists():
-            # 인덱스에는 있을 수 있음 (이동/삭제 직후)
-            indexed = self._vector.find_by_path(normalized) if self._vector.exists() else None
-            if not indexed:
-                raise DocumentNotFoundError.of(normalized)
-            content = ""
-        else:
-            try:
-                content = full_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as e:
-                logger.warning(f"Failed to read {full_path}: {e}")
-                content = ""
+        # 유사 문서를 한 번만 조회해 카테고리 투표와 유사경로 표시에 공유한다.
+        # (과거엔 _compute_category_candidates 와 _compute_similar_paths 가
+        # 각각 get_similar 를 호출해 동일 검색을 2번 수행했다.)
+        similar_docs = self._get_similar_docs(normalized, top_k=5)
 
-        # 카테고리 후보: 1) 폴더 기반, 2) 유사 문서 투표
-        category_candidates = self._compute_category_candidates(normalized)
-
-        # 태그 후보: AutoTagger
-        tagger = AutoTagger()
-        tag_candidates = self._compute_tag_candidates(content, tagger)
-
-        # 유사 문서 (참고용)
-        similar_paths = self._compute_similar_paths(normalized)
+        category_candidates = self._compute_category_candidates(
+            normalized, similar_docs
+        )
+        tag_candidates = self._compute_tag_candidates(content, AutoTagger())
+        similar_paths = tuple(
+            getattr(doc, "path", "") for doc in similar_docs if getattr(doc, "path", "")
+        )
 
         reasoning = self._build_reasoning(
             category_candidates, tag_candidates, similar_paths
@@ -240,6 +237,39 @@ class ClassificationService:
             similar_paths=similar_paths,
             reasoning=reasoning,
         )
+
+    def _load_content(self, normalized_path: str) -> str:
+        """분류용 본문 로드.
+
+        파일이 디스크에 있으면 읽고, 없으면 인덱스 존재 여부만 확인한다
+        (이동/삭제 직후 인덱스에만 남은 경우 허용). 둘 다 없으면 예외.
+
+        Raises:
+            DocumentNotFoundError: 디스크에도 인덱스에도 없음.
+        """
+        full_path = self._pages_path / normalized_path
+        if not full_path.exists():
+            indexed = (
+                self._vector.find_by_path(normalized_path)
+                if self._vector.exists()
+                else None
+            )
+            if not indexed:
+                raise DocumentNotFoundError.of(normalized_path)
+            return ""
+        try:
+            return full_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning(f"Failed to read {full_path}: {e}")
+            return ""
+
+    def _get_similar_docs(self, normalized_path: str, top_k: int) -> list:
+        """유사 문서 조회(실패 시 빈 리스트). 카테고리 투표/유사경로에 공유."""
+        try:
+            return self._document_service.get_similar(normalized_path, top_k=top_k)
+        except Exception as e:
+            logger.debug(f"get_similar failed: {e}")
+            return []
 
     def invalidate(self) -> None:
         """캐시 무효화. ``wiki_reindex`` 후 호출."""
@@ -278,11 +308,19 @@ class ClassificationService:
             rel_paths.append(rel_str)
         return rel_paths
 
-    def _compute_category_candidates(self, normalized_path: str) -> tuple[str, ...]:
+    def _compute_category_candidates(
+        self, normalized_path: str, similar_docs: list
+    ) -> tuple[str, ...]:
         """카테고리 후보 계산.
 
         1) 폴더 기반: 경로 첫 컴포넌트가 카테고리면 1순위
-        2) 유사 문서 투표: 이웃 문서들의 카테고리 빈도
+        2) 유사 문서 투표: 이웃 문서들의 카테고리 빈도 (상위 3개만)
+        3) 활성 카테고리 보조 채움
+
+        Args:
+            normalized_path: 정규화된 대상 경로.
+            similar_docs: 호출자가 한 번 조회해 공유하는 유사 문서 리스트.
+                투표에는 상위 3개만 사용한다(과거 top_k=3 동작 보존).
         """
         candidates: list[str] = []
 
@@ -295,15 +333,9 @@ class ClassificationService:
             if first_component in active_cats:
                 candidates.append(first_component)
 
-        # 2) 유사 문서 투표
-        try:
-            similar_docs = self._document_service.get_similar(normalized_path, top_k=3)
-        except Exception as e:
-            logger.debug(f"get_similar failed: {e}")
-            similar_docs = []
-
+        # 2) 유사 문서 투표 (상위 3개)
         votes: Counter[str] = Counter()
-        for doc in similar_docs:
+        for doc in similar_docs[:3]:
             cat = (getattr(doc, "category", "") or "").strip()
             if cat and cat != "uncategorized":
                 votes[cat] += 1
@@ -340,14 +372,6 @@ class ClassificationService:
             if len(merged) >= 8:
                 break
         return tuple(merged)
-
-    def _compute_similar_paths(self, normalized_path: str) -> tuple[str, ...]:
-        """유사 문서 경로 (참고용)."""
-        try:
-            similar = self._document_service.get_similar(normalized_path, top_k=5)
-        except Exception:
-            return ()
-        return tuple(getattr(doc, "path", "") for doc in similar if getattr(doc, "path", ""))
 
     def _build_reasoning(
         self,

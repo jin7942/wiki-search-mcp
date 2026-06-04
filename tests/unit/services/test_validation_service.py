@@ -137,3 +137,43 @@ class TestValidationServiceEdgeCases:
 
         missing_title = [i for i in report.issues if i.type == "missing_title"]
         assert len(missing_title) == 1
+
+
+class TestFieldRules:
+    """선언적 필드 규칙 테이블(_FIELD_RULES) 술어 검증."""
+
+    def test_title_missing_predicate(self):
+        from wiki_search_mcp.services.validation_service import _title_missing
+
+        assert _title_missing({"path": "a.md", "title": ""}) is True
+        # title == path stem 이면 누락 간주
+        assert _title_missing({"path": "a.md", "title": "a"}) is True
+        assert _title_missing({"path": "a.md", "title": "Real Title"}) is False
+
+    def test_confidence_missing_predicate(self):
+        from wiki_search_mcp.services.validation_service import _confidence_missing
+
+        # score 0 + level low → 누락
+        assert _confidence_missing(
+            {"confidence_score": 0, "confidence_level": "low"}
+        ) is True
+        # 기본값(50, medium) → 누락 아님
+        assert _confidence_missing({}) is False
+        assert _confidence_missing(
+            {"confidence_score": 80, "confidence_level": "high"}
+        ) is False
+
+    def test_rule_table_covers_expected_fields(self):
+        """규칙 테이블이 기대 issue type 을 모두 포함."""
+        from wiki_search_mcp.services.validation_service import _FIELD_RULES
+
+        types = {r.issue_type for r in _FIELD_RULES if r.issue_type}
+        assert types == {
+            "missing_title",
+            "missing_state",
+            "missing_tags",
+            "missing_confidence",
+        }
+        # created/updated 는 issue_type=None(통계 전용) 규칙 2개
+        none_rules = [r for r in _FIELD_RULES if r.issue_type is None]
+        assert len(none_rules) == 2
