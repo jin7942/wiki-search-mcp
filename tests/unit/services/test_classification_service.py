@@ -350,6 +350,107 @@ def test_to_dict_serialization(wiki_path: Path, matcher: IgnoreMatcher):
 
 
 # =============================================================================
+# Gap #8 회귀: 신호(폴더/유사문서)가 없을 때 정적 카테고리 목록을 신호처럼
+#내보내면 모든 파일이 동일 후보로 수렴한다. 신호 부재를 reasoning에 명시.
+# =============================================================================
+
+
+def test_candidates_marked_no_signal_when_static_only(
+    wiki_path: Path, matcher: IgnoreMatcher
+):
+    """폴더도 카테고리가 아니고 유사 문서도 없으면 후보는 정적 보조뿐 →
+    reasoning에 '신호 없음'을 명시해야 한다(과거엔 정적 5개를 신호처럼 반환)."""
+    (wiki_path / "메일 임시.md").write_text("# 임시\n본문", encoding="utf-8")
+
+    listing = CategoryListing.of(
+        mode="folder",
+        categories=["projects", "devops", "domain", "infra", "lifestyle"],
+        detected_at="now",
+    )
+    svc = _make_classification_service(
+        wiki_path, matcher, indexed_docs=[], similar_docs=[], listing=listing
+    )
+
+    suggestion = svc.suggest_classification("메일 임시.md")
+
+    # 후보 자체는 활성 카테고리 목록(보조)으로 채워짐
+    assert suggestion.category_candidates == (
+        "projects",
+        "devops",
+        "domain",
+        "infra",
+        "lifestyle",
+    )
+    # 핵심: 신호가 없음을 근거에 드러내야 함
+    assert "신호 없음" in suggestion.reasoning
+
+
+def test_candidates_no_signal_marker_absent_when_folder_signal(
+    wiki_path: Path, matcher: IgnoreMatcher
+):
+    """폴더 신호가 있으면 '신호 없음' 마커가 붙지 않는다."""
+    (wiki_path / "infra").mkdir()
+    (wiki_path / "infra" / "nginx.md").write_text("# Nginx", encoding="utf-8")
+
+    listing = CategoryListing.of(
+        mode="folder", categories=["infra", "dev"], detected_at="now"
+    )
+    svc = _make_classification_service(
+        wiki_path, matcher, indexed_docs=[], similar_docs=[], listing=listing
+    )
+
+    suggestion = svc.suggest_classification("infra/nginx.md")
+
+    assert suggestion.category_candidates[0] == "infra"
+    assert "신호 없음" not in suggestion.reasoning
+
+
+def test_candidates_differ_by_similar_docs(wiki_path: Path, matcher: IgnoreMatcher):
+    """유사 문서가 다르면 후보 1순위도 달라진다(파일별 차별 신호 작동).
+
+    과거엔 similar_docs 와 무관하게 정적 목록이 결과를 지배해 모든 파일이
+    같은 후보를 반환했다.
+    """
+    (wiki_path / "a.md").write_text("# A\n본문", encoding="utf-8")
+    (wiki_path / "b.md").write_text("# B\n본문", encoding="utf-8")
+
+    listing = CategoryListing.of(
+        mode="folder",
+        categories=["projects", "devops", "domain", "infra", "lifestyle"],
+        detected_at="now",
+    )
+
+    svc_a = _make_classification_service(
+        wiki_path,
+        matcher,
+        indexed_docs=[],
+        similar_docs=[
+            Document.from_dict({"path": "infra/x.md", "category": "infra", "title": "X"}),
+        ],
+        listing=listing,
+    )
+    sugg_a = svc_a.suggest_classification("a.md")
+
+    svc_b = _make_classification_service(
+        wiki_path,
+        matcher,
+        indexed_docs=[],
+        similar_docs=[
+            Document.from_dict(
+                {"path": "devops/y.md", "category": "devops", "title": "Y"}
+            ),
+        ],
+        listing=listing,
+    )
+    sugg_b = svc_b.suggest_classification("b.md")
+
+    # 유사 문서의 카테고리가 1순위로 올라와 서로 달라야 한다
+    assert sugg_a.category_candidates[0] == "infra"
+    assert sugg_b.category_candidates[0] == "devops"
+    assert sugg_a.category_candidates[0] != sugg_b.category_candidates[0]
+
+
+# =============================================================================
 # v0.2.5: inbox staging 폴더의 .md는 frontmatter 상태와 무관하게 항상 pending
 # =============================================================================
 

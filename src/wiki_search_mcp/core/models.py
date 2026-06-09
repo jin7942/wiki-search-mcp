@@ -519,6 +519,143 @@ class ClassificationSuggestion:
         }
 
 
+@dataclass(frozen=True)
+class SubfolderGroup:
+    """평면 프로젝트 폴더 내에서 묶을 수 있는 한 서브폴더 후보.
+
+    Attributes:
+        name: 제안 서브폴더 이름(공통 태그/키워드 유래).
+        files: 이 그룹에 속하는 상대 경로 목록(폴더 기준이 아닌 pages 기준).
+        signal: 그룹을 형성한 공통 신호(태그/키워드 등, 사람이 읽기 위함).
+    """
+
+    name: str
+    files: tuple[str, ...]
+    signal: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "files": list(self.files), "signal": self.signal}
+
+
+@dataclass(frozen=True)
+class SubfolderSuggestion:
+    """한 프로젝트(또는 카테고리) 폴더의 서브폴더 계층화 제안.
+
+    MCP read-only 원칙을 따라 제안만 반환한다. 실제 파일 이동/폴더 생성은
+    Claude(또는 사용자)가 일반 도구로 수행한다.
+
+    Attributes:
+        folder: 대상 폴더 상대 경로(pages 기준).
+        file_count: 폴더 직계 .md 파일 수.
+        groups: 제안된 서브폴더 그룹들(크기 내림차순).
+        unclassified: 어느 그룹에도 들지 못한 파일들(상대 경로).
+        reasoning: 제안 근거(사람이 읽기 위함).
+    """
+
+    folder: str
+    file_count: int
+    groups: tuple[SubfolderGroup, ...] = ()
+    unclassified: tuple[str, ...] = ()
+    reasoning: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "folder": self.folder,
+            "file_count": self.file_count,
+            "groups": [g.to_dict() for g in self.groups],
+            "unclassified": list(self.unclassified),
+            "reasoning": self.reasoning,
+        }
+
+
+@dataclass(frozen=True)
+class FolderHealth:
+    """평면 누적으로 계층화가 권장되는 폴더 한 건.
+
+    Attributes:
+        path: 폴더 상대 경로(pages 기준).
+        file_count: 폴더 직계 .md 파일 수.
+        has_subfolders: 이미 서브폴더가 있는지 여부.
+    """
+
+    path: str
+    file_count: int
+    has_subfolders: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "file_count": self.file_count,
+            "has_subfolders": self.has_subfolders,
+        }
+
+
+@dataclass(frozen=True)
+class HealthReport:
+    """Wiki 구조 건강 진단(read-only).
+
+    Attributes:
+        needs_hierarchization: 평면 누적으로 서브폴더 분할이 권장되는 폴더들
+            (file_count 내림차순).
+        empty_folders: 파일이 0개인 폴더들의 상대 경로.
+        reasoning: 진단 요약(사람이 읽기 위함).
+    """
+
+    needs_hierarchization: tuple[FolderHealth, ...] = ()
+    empty_folders: tuple[str, ...] = ()
+    reasoning: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "needs_hierarchization": [
+                f.to_dict() for f in self.needs_hierarchization
+            ],
+            "empty_folders": list(self.empty_folders),
+            "reasoning": self.reasoning,
+        }
+
+
+@dataclass(frozen=True)
+class FilenameRename:
+    """파일명 정규화 제안 한 건(날짜 포맷 표준화).
+
+    Attributes:
+        current: 현재 상대 경로.
+        suggested: 제안 상대 경로(같은 폴더 내, 표준 날짜 포맷).
+        reason: 제안 근거(감지된 날짜 패턴 등).
+    """
+
+    current: str
+    suggested: str
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "current": self.current,
+            "suggested": self.suggested,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class FilenameNormalization:
+    """파일명 정규화 제안 모음(read-only).
+
+    Attributes:
+        candidates: 정규화 제안 목록.
+        reasoning: 요약.
+    """
+
+    candidates: tuple[FilenameRename, ...] = ()
+    reasoning: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidates": [c.to_dict() for c in self.candidates],
+            "reasoning": self.reasoning,
+        }
+
+
 # =============================================================================
 # v0.2.0: Daemon 자동 분류 모델
 # =============================================================================

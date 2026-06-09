@@ -20,7 +20,10 @@ from wiki_search_mcp.adapters.mcp.handlers import (
     handle_wiki_search,
     handle_wiki_stats,
     handle_wiki_suggest_categories,
+    handle_wiki_health_check,
     handle_wiki_suggest_classification,
+    handle_wiki_suggest_filename_normalization,
+    handle_wiki_suggest_subfolders,
     handle_wiki_suggest_tags,
     handle_wiki_validate,
     handle_wiki_watch_status,
@@ -591,6 +594,111 @@ class TestHandleWikiSuggestClassification:
         result = handle_wiki_suggest_classification(container, path="../etc/passwd")
         data = json.loads(result)
         assert "error" in data
+
+
+class TestHandleWikiSuggestSubfolders:
+    """handle_wiki_suggest_subfolders 테스트."""
+
+    def test_returns_suggestion(self):
+        container = _create_mock_container()
+        suggestion = MagicMock()
+        suggestion.to_dict.return_value = {
+            "folder": "projects/KT",
+            "file_count": 4,
+            "groups": [{"name": "vpn", "files": ["projects/KT/a.md"], "signal": "x"}],
+            "unclassified": ["projects/KT/d.md"],
+            "reasoning": "...",
+        }
+        container.classification_service.suggest_subfolders.return_value = suggestion
+
+        result = handle_wiki_suggest_subfolders(
+            container, folder_path="projects/KT", min_cluster_size=3
+        )
+        data = json.loads(result)
+
+        assert data["folder"] == "projects/KT"
+        assert data["groups"][0]["name"] == "vpn"
+        # min_cluster_size 가 서비스로 전달됐는지
+        container.classification_service.suggest_subfolders.assert_called_once_with(
+            "projects/KT", min_cluster_size=3
+        )
+
+    def test_invalid_path_returns_error(self):
+        container = _create_mock_container()
+        container.classification_service.suggest_subfolders.side_effect = (
+            InvalidPathError.of("../etc")
+        )
+
+        result = handle_wiki_suggest_subfolders(container, folder_path="../etc")
+        data = json.loads(result)
+        assert "error" in data
+
+
+class TestHandleWikiHealthCheck:
+    """handle_wiki_health_check 테스트."""
+
+    def test_returns_report(self):
+        container = _create_mock_container()
+        report = MagicMock()
+        report.to_dict.return_value = {
+            "needs_hierarchization": [
+                {"path": "projects/KT", "file_count": 11, "has_subfolders": False}
+            ],
+            "empty_folders": ["projects/Empty"],
+            "reasoning": "...",
+        }
+        container.classification_service.health_check.return_value = report
+
+        result = handle_wiki_health_check(container, threshold_flat=10)
+        data = json.loads(result)
+
+        assert data["needs_hierarchization"][0]["path"] == "projects/KT"
+        assert "projects/Empty" in data["empty_folders"]
+        container.classification_service.health_check.assert_called_once_with(
+            threshold_flat=10
+        )
+
+
+class TestHandleWikiSuggestFilenameNormalization:
+    """handle_wiki_suggest_filename_normalization 테스트."""
+
+    def test_returns_candidates(self):
+        container = _create_mock_container()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {
+            "candidates": [
+                {
+                    "current": "m/2026.05.12 x.md",
+                    "suggested": "m/2026-05-12 x.md",
+                    "reason": "...",
+                }
+            ],
+            "reasoning": "...",
+        }
+        container.classification_service.suggest_filename_normalization.return_value = (
+            result_obj
+        )
+
+        result = handle_wiki_suggest_filename_normalization(container, folder_path="m")
+        data = json.loads(result)
+
+        assert data["candidates"][0]["suggested"] == "m/2026-05-12 x.md"
+        container.classification_service.suggest_filename_normalization.assert_called_once_with(
+            "m"
+        )
+
+    def test_none_folder_scans_all(self):
+        container = _create_mock_container()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"candidates": [], "reasoning": "없음"}
+        container.classification_service.suggest_filename_normalization.return_value = (
+            result_obj
+        )
+
+        handle_wiki_suggest_filename_normalization(container, folder_path=None)
+        container.classification_service.suggest_filename_normalization.assert_called_once_with(
+            None
+        )
 
 
 class TestExceptionHandling:

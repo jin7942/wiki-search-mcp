@@ -19,6 +19,9 @@ Tools:
 - wiki_suggest_categories: 인덱스 분석 기반 카테고리 후보 제안
 - wiki_pending: 미분류 / 정리 대기 파일 목록
 - wiki_suggest_classification: 단일 파일에 대한 카테고리/태그 추천
+- wiki_suggest_subfolders: 평면 프로젝트 폴더의 서브폴더 계층화 제안
+- wiki_health_check: 폴더 구조 건강 진단(평면 누적 + 빈 폴더)
+- wiki_suggest_filename_normalization: 파일명 날짜 표기 표준화 제안
 """
 
 from __future__ import annotations
@@ -49,8 +52,11 @@ from .handlers import (
     handle_wiki_reindex,
     handle_wiki_search,
     handle_wiki_stats,
+    handle_wiki_health_check,
     handle_wiki_suggest_categories,
     handle_wiki_suggest_classification,
+    handle_wiki_suggest_filename_normalization,
+    handle_wiki_suggest_subfolders,
     handle_wiki_suggest_tags,
     handle_wiki_validate,
     handle_wiki_watch_status,
@@ -643,6 +649,76 @@ def wiki_suggest_classification(path: str) -> str:
     """
     return handle_wiki_suggest_classification(
         container=get_container(), path=path
+    )
+
+
+@mcp.tool()
+def wiki_suggest_subfolders(folder_path: str, min_cluster_size: int = 3) -> str:
+    """평면 프로젝트 폴더를 서브폴더로 계층화하는 구조를 제안받습니다.
+
+    파일이 누적된 프로젝트 폴더(예: projects/KT_ITPARK)에서 frontmatter
+    태그와 본문 키워드를 공통 신호로 묶어 서브폴더 후보를 제시합니다.
+    ``min_cluster_size`` 개 이상 묶이는 신호만 서브폴더로 제안하며, 어느
+    그룹에도 못 든 파일은 unclassified로 반환합니다.
+
+    이 도구는 제안만 반환합니다(read-only). 실제 폴더 생성/파일 이동은
+    결과를 사용자에게 보고하고 승인받은 뒤 Claude의 Bash/Write 도구로
+    직접 수행하세요.
+
+    Args:
+        folder_path: 대상 폴더 상대 경로 (예: "projects/KT_ITPARK")
+        min_cluster_size: 서브폴더로 제안할 최소 파일 수 (기본 3)
+
+    Returns:
+        {folder, file_count, groups:[{name, files, signal}], unclassified,
+        reasoning} JSON 문자열
+    """
+    return handle_wiki_suggest_subfolders(
+        container=get_container(),
+        folder_path=folder_path,
+        min_cluster_size=min_cluster_size,
+    )
+
+
+@mcp.tool()
+def wiki_health_check(threshold_flat: int = 10) -> str:
+    """Wiki 폴더 구조의 건강 상태를 진단받습니다(read-only).
+
+    두 가지를 찾습니다.
+    1. 계층화 권장: 직계 .md 파일이 ``threshold_flat`` 이상인데 서브폴더가
+       없는 평면 누적 폴더 → wiki_suggest_subfolders 로 분할 검토.
+    2. 빈 폴더: 하위 어디에도 .md 가 없는 폴더 → archive/inbox 검토.
+
+    Args:
+        threshold_flat: 평면 누적 경고 임계 (기본 10)
+
+    Returns:
+        {needs_hierarchization:[{path, file_count, has_subfolders}],
+        empty_folders, reasoning} JSON 문자열
+    """
+    return handle_wiki_health_check(
+        container=get_container(), threshold_flat=threshold_flat
+    )
+
+
+@mcp.tool()
+def wiki_suggest_filename_normalization(folder_path: str = "") -> str:
+    """파일명 선두의 날짜 표기를 표준 YYYY-MM-DD 로 정규화 제안받습니다.
+
+    ``2026.05.12``, ``26.05.11``, ``260513`` 등 제각각인 날짜 표기를 표준
+    포맷으로 통일하는 rename 후보를 제시합니다. 제안만 반환합니다(read-only).
+    실제 rename 과 wiki 링크/백링크 갱신은 결과를 검토한 뒤 Claude 의
+    Bash/Edit 도구로 직접 수행하세요.
+
+    Args:
+        folder_path: 대상 폴더 상대 경로. 빈 문자열이면 pages 전체.
+
+    Returns:
+        {candidates:[{current, suggested, reason}], reasoning} JSON 문자열
+    """
+    return handle_wiki_suggest_filename_normalization(
+        container=get_container(),
+        folder_path=folder_path or None,
     )
 
 

@@ -149,3 +149,26 @@ def validate_path_for_query(path: str) -> str:
         InvalidPathError: 유효하지 않은 경로. ``context.details["reason"]``로 사유 구분.
     """
     return _basic_checks(path)
+
+
+def validate_dir_path(path: str, base_dir: Path | None = None) -> str:
+    """디렉토리 경로 검증 및 정규화.
+
+    ``validate_path`` 와 동일한 traversal 방어를 수행하되 ``.md`` 확장자를
+    붙이지 않는다(폴더 대상). 서브폴더 제안 등 폴더를 인자로 받는 유스케이스에
+    사용한다.
+
+    Args:
+        path: 검증할 상대 폴더 경로
+        base_dir: 기준 디렉토리 (None이면 기본 검증만 수행)
+
+    Returns:
+        정규화된 폴더 경로 문자열 (.md 미부착)
+
+    Raises:
+        InvalidPathError: 유효하지 않은 경로. ``context.details["reason"]``로 사유 구분.
+    """
+    stripped = _basic_checks(path)
+    if base_dir is not None:
+        _validate_within_base(stripped, base_dir)
+    return stripped

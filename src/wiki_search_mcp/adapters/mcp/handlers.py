@@ -651,3 +651,64 @@ def handle_wiki_suggest_classification(
         validated_path
     )
     return _json_response(suggestion.to_dict())
+
+
+@mcp_handler("wiki_suggest_subfolders")
+def handle_wiki_suggest_subfolders(
+    container: "ServiceContainer", folder_path: str, min_cluster_size: int = 3
+) -> str:
+    """평면 프로젝트 폴더의 서브폴더 계층화 제안 핸들러.
+
+    경로 검증은 서비스(``validate_dir_path``)가 수행한다(폴더 대상이라 .md
+    강제 정규화를 하지 않기 위함).
+
+    Args:
+        container: 서비스 컨테이너
+        folder_path: 대상 폴더 상대 경로 (예: "projects/KT_ITPARK")
+        min_cluster_size: 서브폴더로 제안할 최소 파일 수
+
+    Returns:
+        SubfolderSuggestion JSON 문자열
+    """
+    suggestion = container.classification_service.suggest_subfolders(
+        folder_path, min_cluster_size=min_cluster_size
+    )
+    return _json_response(suggestion.to_dict())
+
+
+@mcp_handler("wiki_health_check")
+def handle_wiki_health_check(
+    container: "ServiceContainer", threshold_flat: int = 10
+) -> str:
+    """Wiki 구조 건강 진단 핸들러(평면 누적 + 빈 폴더).
+
+    Args:
+        container: 서비스 컨테이너
+        threshold_flat: 평면 누적 경고 임계(직계 파일 수)
+
+    Returns:
+        HealthReport JSON 문자열
+    """
+    report = container.classification_service.health_check(
+        threshold_flat=threshold_flat
+    )
+    return _json_response(report.to_dict())
+
+
+@mcp_handler("wiki_suggest_filename_normalization")
+def handle_wiki_suggest_filename_normalization(
+    container: "ServiceContainer", folder_path: str | None = None
+) -> str:
+    """파일명 선두 날짜 표준화 제안 핸들러.
+
+    Args:
+        container: 서비스 컨테이너
+        folder_path: 대상 폴더(None 이면 전체)
+
+    Returns:
+        FilenameNormalization JSON 문자열
+    """
+    result = container.classification_service.suggest_filename_normalization(
+        folder_path
+    )
+    return _json_response(result.to_dict())

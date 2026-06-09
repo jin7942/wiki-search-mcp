@@ -16,21 +16,30 @@ from wiki_search_mcp.core.utils import parse_frontmatter
 from wiki_search_mcp.services.filters import apply_simple_filters
 
 if TYPE_CHECKING:
-    from wiki_search_mcp.core.protocols import VectorRepository
+    from wiki_search_mcp.core.protocols import EmbeddingProvider, VectorRepository
 
 
 class DocumentService:
     """문서 CRUD 유스케이스 담당."""
 
-    def __init__(self, vector_repository: "VectorRepository", pages_path: Path):
+    def __init__(
+        self,
+        vector_repository: "VectorRepository",
+        pages_path: Path,
+        embedder: "EmbeddingProvider | None" = None,
+    ):
         """DocumentService 초기화.
 
         Args:
             vector_repository: 벡터 저장소
             pages_path: 문서 파일 경로
+            embedder: 임베딩 제공자(옵션). 주입하면 인덱스에 없는 신규/이동
+                직후 파일도 본문을 즉석 임베딩해 유사 문서를 찾을 수 있다
+                (분류 추천의 닭-달걀 문제 해소). None이면 인덱스 벡터에만 의존.
         """
         self._store = vector_repository
         self._pages_path = pages_path
+        self._embedder = embedder
 
     def get_document(
         self,
@@ -226,8 +235,11 @@ class DocumentService:
         if not self._store.exists():
             return []
 
-        # 대상 문서의 벡터 조회
+        # 대상 문서의 벡터 조회. 인덱스에 없으면(신규/이동 직후) 디스크
+        # 본문을 즉석 임베딩해 검색한다(embedder 주입 시).
         target_vec = self._store.get_vector_by_path(path)
+        if not target_vec:
+            target_vec = self._embed_disk_content(path)
         if not target_vec:
             return []
 
@@ -247,6 +259,40 @@ class DocumentService:
                 break
 
         return results
+
+    def _embed_disk_content(self, path: str) -> list[float] | None:
+        """디스크 본문을 즉석 임베딩(인덱스에 없는 파일용).
+
+        embedder가 주입되지 않았거나 파일이 없거나 본문이 비어 있으면
+        None을 반환한다(조용히 인덱스 벡터 부재와 동일하게 처리).
+
+        Args:
+            path: 검증된 상대 경로(.md 정규화 완료).
+
+        Returns:
+            임베딩 벡터 또는 None.
+        """
+        if self._embedder is None:
+            return None
+
+        file_path = self._pages_path / path
+        if not file_path.exists():
+            return None
+
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+        # parse_frontmatter 는 frontmatter 가 없으면 body=원문, 있으면 본문만
+        # 반환한다. frontmatter 만 있는 파일은 body 가 빈 문자열이 되므로 이때는
+        # 임베딩하지 않는다(frontmatter 원문을 임베딩하지 않기 위함).
+        _, body = parse_frontmatter(content)
+        text = body.strip()
+        if not text:
+            return None
+
+        return self._embedder.encode(text)
 
     def _validate_path(self, path: str) -> str:
         """경로 유효성 검사.

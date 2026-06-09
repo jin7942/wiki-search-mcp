@@ -191,6 +191,7 @@ class ServiceContainer:
             self._cache["document_svc"] = DocumentService(
                 vector_repository=self.vector_repository,
                 pages_path=resolve_pages_path(self._wiki_path),
+                embedder=self.embedder,
             )
         return self._cache["document_svc"]
 
