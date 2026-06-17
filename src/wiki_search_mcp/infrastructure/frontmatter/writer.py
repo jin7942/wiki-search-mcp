@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from wiki_search_mcp.core.config import is_staging_folder
 from wiki_search_mcp.core.models import AppliedRecord, ClassificationDecision
 from wiki_search_mcp.core.types import FrontmatterDict
 from wiki_search_mcp.core.utils import parse_frontmatter, render_frontmatter
@@ -283,8 +284,20 @@ class FrontmatterWriter:
 
         meta_after: FrontmatterDict = dict(meta_before)
 
-        # 사용자 값 우선: 이미 category 있으면 그대로
-        if not meta_after.get("category"):
+        # 카테고리 결정.
+        # 사용자 값 우선이 원칙이나, inbox(staging)는 카테고리가 아니라 임시
+        # 영역이다(instructions.py 명세). 파일이 staging 폴더 안에 있거나
+        # category 값 자체가 staging 표식(inbox/_inbox/0.Inbox …)이면 사용자
+        # 의도가 아니라 미분류 상태이므로 분류 결과로 덮어쓴다. 이 처리가 없으면
+        # category: inbox 가 박힌 파일이 decide_target_path 에서 '제자리'로
+        # 판정돼 inbox 에 영구히 갇힌다.
+        first_part = Path(rel_path).parts[0] if Path(rel_path).parts else ""
+        existing_category = meta_after.get("category")
+        is_staging = is_staging_folder(first_part) or (
+            isinstance(existing_category, str)
+            and is_staging_folder(existing_category.strip())
+        )
+        if is_staging or not existing_category:
             meta_after["category"] = decision.category
 
         # subcategory 도 사용자 값 우선 (의도적으로 비웠을 수 있으므로 key 존재 여부로 판단).

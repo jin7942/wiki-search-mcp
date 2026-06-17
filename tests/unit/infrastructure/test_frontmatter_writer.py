@@ -85,6 +85,50 @@ def test_apply_preserves_existing_category(tmp_path: Path) -> None:
     assert (pages / "notes" / "x.md").exists()
 
 
+def test_apply_reclassifies_inbox_file_with_inbox_category(tmp_path: Path) -> None:
+    """회귀 방지: inbox(staging) 파일은 frontmatter에 category: inbox가 박혀
+    있어도 분류 결과(decision)로 덮어쓰고 카테고리 폴더로 이동한다.
+
+    버그(writer.py:287): inbox를 '사용자 지정 카테고리'로 오인해 decision을
+    무시 → 파일이 inbox에 영구히 갇힘. instructions.py 명세는 'inbox 파일은
+    category가 박혀 있어도 daemon이 재분류해 이동'이라고 규정한다.
+    """
+    pages = tmp_path
+    (pages / "inbox").mkdir()
+    (pages / "inbox" / "x.md").write_text(
+        "---\ncategory: inbox\ntags: [user]\n---\n\n# Heading\nbody\n",
+        encoding="utf-8",
+    )
+
+    writer = FrontmatterWriter(pages)
+    record = writer.apply("inbox/x.md", _make_decision("troubleshooting", ("nginx",), 0.92))
+
+    # staging 표식(category: inbox)은 무시되고 decision으로 덮어써져 이동.
+    assert record.path_after == "troubleshooting/x.md"
+    assert (pages / "troubleshooting" / "x.md").exists()
+    assert not (pages / "inbox" / "x.md").exists()
+
+    meta, _ = parse_frontmatter((pages / "troubleshooting" / "x.md").read_text(encoding="utf-8"))
+    assert meta["category"] == "troubleshooting"
+    # 사용자 태그는 보존 (category만 staging이라 덮어쓴 것).
+    assert "user" in meta["tags"]
+
+
+def test_apply_reclassifies_inbox_variant_folder(tmp_path: Path) -> None:
+    """inbox 변형(_inbox, 0.Inbox 등)도 staging으로 인식해 재분류."""
+    pages = tmp_path
+    (pages / "0.Inbox").mkdir()
+    (pages / "0.Inbox" / "y.md").write_text(
+        "---\ncategory: inbox\n---\n\n# H\nbody\n", encoding="utf-8"
+    )
+
+    writer = FrontmatterWriter(pages)
+    record = writer.apply("0.Inbox/y.md", _make_decision("infra", ("nginx",), 0.9))
+
+    assert record.path_after == "infra/y.md"
+    assert (pages / "infra" / "y.md").exists()
+
+
 def test_apply_collision_avoidance(tmp_path: Path) -> None:
     pages = tmp_path
     (pages / "inbox").mkdir()

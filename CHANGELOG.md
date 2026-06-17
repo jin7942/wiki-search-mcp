@@ -3,6 +3,21 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.6.1] - 2026-06-17
+
+### Fixed
+
+- **inbox 파일이 영구히 갇히던 버그 (`FrontmatterWriter.apply`)**: frontmatter
+  에 ``category: inbox`` (또는 ``_inbox``/``0.Inbox`` 등 staging 변형)가 박힌
+  파일이 자동 분류돼도 카테고리 폴더로 이동하지 않고 inbox 에 남던 회귀를
+  수정했다. writer 가 staging 표식을 '사용자 지정 카테고리'로 오인해 분류
+  결과(decision.category)를 무시 → ``decide_target_path`` 가 '제자리'로 판정
+  → 매 rescan 마다 동일하게 갇혔다. 이제 파일이 staging 폴더 안에 있거나
+  category 값 자체가 staging 표식이면 분류 결과로 덮어쓴다. 이는 ``inbox``
+  파일은 category 가 박혀 있어도 daemon 이 재분류해 이동한다는 instructions
+  명세와 일치한다. 정상 카테고리(``notes`` 등)의 사용자 값은 그대로 보존.
+  회귀 방지 테스트 2종 추가.
+
 ## [0.6.0] - 2026-06-09
 
 분류 추천이 인덱스 벡터에만 의존하던 닭-달걀을 해소하고, 평면 프로젝트 폴더의
