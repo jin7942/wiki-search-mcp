@@ -49,6 +49,7 @@ from wiki_search_mcp.services.classifier_service import (
     ClassifierService,
     ClassifierSkipped,
 )
+from wiki_search_mcp.services.hierarchization_service import HierarchizationService
 from wiki_search_mcp.services.llm.claude_code_provider import ClaudeCodeProvider
 
 logger = logging.getLogger(__name__)
@@ -97,23 +98,41 @@ class DaemonRunner:
             else ClaudeCodeProvider(model=opts.llm_model)
         )
         self._provider = provider
-        self._classifier = ClassifierService(
-            classification_service=self._container.classification_service,
-            category_service=self._container.category_service,
-            provider=provider,
-            pages_path=self._container.pages_path,
-            min_body_chars=opts.min_body_chars,
-        )
-
         self._rate = SlidingWindowRateLimit(
             opts.rate_per_minute,
             opts.rate_per_hour,
             opts.rate_per_day,
             max_wait_s=opts.rate_max_wait_s,
         )
+        self._classifier = ClassifierService(
+            classification_service=self._container.classification_service,
+            category_service=self._container.category_service,
+            provider=provider,
+            pages_path=self._container.pages_path,
+            min_body_chars=opts.min_body_chars,
+            rate_acquire=self._rate.acquire,
+        )
         self._pending = JsonlLog(pending_jsonl(opts.wiki_path))
         self._applied = JsonlLog(applied_jsonl(opts.wiki_path))
         self._status = StatusFile(status_file(opts.wiki_path))
+        # path → 마지막으로 pending.jsonl 에 기록한 reason. 같은 파일이 같은
+        # 사유로 rescan 마다 반복 기록되어 로그가 폭증하는 것을 막는다
+        # (rate_limited 1650건 중복 사례). reason 이 바뀌면 다시 기록.
+        self._pending_logged: dict[str, str] = {}
+
+        # 구조 유지 (평면 누적 폴더 계층화 — health_check 경고의 실행 주체).
+        self._hierarchizer = HierarchizationService(
+            classification_service=self._container.classification_service,
+            writer=self._writer,
+            applied_log=self._applied,
+            pages_path=self._container.pages_path,
+            provider=provider,
+            rate_acquire=self._rate.acquire,
+        )
+        # 폴더 → 재계획 쿨다운 만료 시각. pending 기록된 폴더를 매 주기
+        # 재계획(LLM 재호출)하지 않게 한다.
+        self._structure_cooldown: dict[str, float] = {}
+        self._structure_cooldown_seconds: float = 86400.0
 
     # ------------------------------------------------------------------ start
     def start(self) -> None:
@@ -188,17 +207,26 @@ class DaemonRunner:
         if self._opts.rescan_interval_seconds > 0:
             periodic = asyncio.create_task(self._periodic_rescan())
 
+        # 주기 구조 유지 — 평면 누적 폴더 계층화 + 파일명 정규화 후보 노출.
+        structure: asyncio.Task | None = None
+        if self._opts.hierarchize_interval_seconds > 0:
+            structure = asyncio.create_task(self._periodic_structure())
+
         try:
             await self._stop.wait()
         finally:
             logger.info("daemon stopping...")
             if periodic is not None:
                 periodic.cancel()
+            if structure is not None:
+                structure.cancel()
             for w in workers:
                 w.cancel()
             tasks = [*workers]
             if periodic is not None:
                 tasks.append(periodic)
+            if structure is not None:
+                tasks.append(structure)
             results = await asyncio.gather(*tasks, return_exceptions=True)
             # gather(return_exceptions=True) 는 예외를 반환값으로 돌리므로
             # 직접 검사하지 않으면 worker/periodic 의 비정상 종료가 silent 가 된다.
@@ -235,6 +263,117 @@ class DaemonRunner:
                     last_rescan_error=str(e),
                     last_rescan_error_at=_utc_now(),
                 )
+
+    async def _periodic_structure(self) -> None:
+        """``hierarchize_interval_seconds`` 마다 구조 유지 패스 실행.
+
+        ``_periodic_rescan`` 과 동일한 종료/오류 노출 정책.
+        """
+        interval = self._opts.hierarchize_interval_seconds
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._structure_pass()
+            except Exception as e:
+                logger.exception("structure maintenance failed")
+                self._status.update(
+                    last_structure_error=str(e),
+                    last_structure_error_at=_utc_now(),
+                )
+
+    async def _structure_pass(self) -> None:
+        """평면 누적 폴더 계층화 + 파일명 정규화 후보 노출 (1 패스).
+
+        - ``health_check`` 임계 초과 폴더마다 계층화 계획을 세우고,
+          confidence ≥ threshold 면 자동 적용(+재인덱싱), 미만이면
+          pending.jsonl 에 ``hierarchization`` 항목으로 승인 대기 기록.
+        - 파일명 날짜 정규화 후보가 있으면 pending 에 요약 노출만 한다
+          (rename 자동 적용은 하지 않음 — ``daemon normalize-filenames`` 로 승인).
+        """
+        svc = self._container.classification_service
+        report = await asyncio.to_thread(
+            svc.health_check, self._opts.hierarchize_threshold_flat
+        )
+        now = time.monotonic()
+        applied_any = False
+        for fh in report.needs_hierarchization:
+            folder = fh.path
+            if self._structure_cooldown.get(folder, 0.0) > now:
+                continue
+            try:
+                plan = await self._hierarchizer.plan(folder)
+            except RateLimitError:
+                # 한도 소진 — 이번 패스 중단, 다음 주기에 재시도.
+                logger.info("hierarchization rate-limited; deferring to next cycle")
+                break
+            if not plan.groups:
+                # 묶을 신호 없음 — 한동안 재계획하지 않음.
+                self._structure_cooldown[folder] = (
+                    now + self._structure_cooldown_seconds
+                )
+                continue
+            if (
+                self._opts.auto_hierarchize
+                and plan.confidence >= self._opts.confidence_threshold
+            ):
+                results = await asyncio.to_thread(self._hierarchizer.apply, plan)
+                moved = sum(1 for r in results if r.get("status") == "moved")
+                if moved:
+                    applied_any = True
+                    self._pending_logged.pop(folder, None)
+                    self._status.increment(
+                        "hierarchized_count",
+                        delta=moved,
+                        last_hierarchized_at=_utc_now(),
+                    )
+                logger.info(
+                    "hierarchized %s: %d file(s) moved (confidence=%.2f)",
+                    folder,
+                    moved,
+                    plan.confidence,
+                )
+            else:
+                if self._record_pending(
+                    folder,
+                    "hierarchization",
+                    plan=plan.to_dict(),
+                    confidence=plan.confidence,
+                ):
+                    self._status.increment("pending_count")
+                self._structure_cooldown[folder] = (
+                    now + self._structure_cooldown_seconds
+                )
+
+        if applied_any:
+            try:
+                if self._reindex_lock is not None:
+                    async with self._reindex_lock:
+                        await asyncio.to_thread(self._indexer.reindex, full=False)
+                else:
+                    await asyncio.to_thread(self._indexer.reindex, full=False)
+                self._container.invalidate_all()
+            except Exception as e:
+                logger.exception("post-hierarchize reindex failed (continuing)")
+                self._status.increment(
+                    "reindex_error_count",
+                    last_reindex_error=str(e),
+                    last_reindex_error_at=_utc_now(),
+                )
+
+        # R4: 파일명 정규화 후보 — 승인 대기 노출만 (자동 rename 없음).
+        norm = await asyncio.to_thread(svc.suggest_filename_normalization)
+        if norm.candidates:
+            self._record_pending(
+                "(vault)",
+                "filename_normalization",
+                count=len(norm.candidates),
+                sample=[c.to_dict() for c in norm.candidates[:5]],
+                hint="wiki-search-mcp daemon normalize-filenames 로 승인/적용",
+            )
 
     # ---------------------------------------------------------------- watcher
     def _on_watch_event(self) -> None:
@@ -287,6 +426,21 @@ class DaemonRunner:
                 self._status.increment("error_count")
                 break
 
+    # ---------------------------------------------------------------- pending
+    def _record_pending(self, path: str, reason: str, **extra: object) -> bool:
+        """pending.jsonl 에 기록. 같은 path 가 같은 reason 으로 연속 기록되면 skip.
+
+        Returns:
+            실제로 기록됐으면 True (호출자가 pending_count 증가 판단에 사용).
+        """
+        if self._pending_logged.get(path) == reason:
+            return False
+        self._pending_logged[path] = reason
+        self._pending.append(
+            {"path": path, "reason": reason, **extra, "recorded_at": _utc_now()}
+        )
+        return True
+
     # ---------------------------------------------------------------- worker
     async def _worker(self, idx: int) -> None:
         while not self._stop.is_set():
@@ -299,28 +453,28 @@ class DaemonRunner:
                 continue
             self._inflight.add(rel)
             try:
-                await self._rate.acquire()
                 await self._classify_and_apply(rel)
             except RateLimitError as e:
-                self._pending.append(
-                    {
-                        "path": rel,
-                        "reason": "rate_limited",
-                        "wait_seconds": getattr(e.context, "details", {}).get("wait_seconds") if e.context else None,
-                        "recorded_at": _utc_now(),
-                    }
+                wait = (
+                    getattr(e.context, "details", {}).get("wait_seconds")
+                    if e.context
+                    else None
                 )
-                self._cooldown[rel] = time.monotonic() + self._cooldown_seconds
-                self._status.increment("pending_count", last_classified_at=_utc_now())
+                if self._record_pending(rel, "rate_limited", wait_seconds=wait):
+                    self._status.increment(
+                        "pending_count", last_classified_at=_utc_now()
+                    )
+                # 한도 회복까지 실제로 필요한 시간만큼 재시도를 미룬다. 기본
+                # 600초 cooldown 만 쓰면 일일 한도 소진(wait ≈ 수만 초) 상황에서
+                # 600초마다 헛 재시도가 반복된다.
+                cooldown = max(self._cooldown_seconds, float(wait or 0.0))
+                self._cooldown[rel] = time.monotonic() + cooldown
             except ClassifierError as e:
-                self._pending.append(
-                    {
-                        "path": rel,
-                        "reason": "classifier_error",
-                        "code": getattr(e.context, "code", None) if e.context else None,
-                        "message": str(e)[:200],
-                        "recorded_at": _utc_now(),
-                    }
+                self._record_pending(
+                    rel,
+                    "classifier_error",
+                    code=getattr(e.context, "code", None) if e.context else None,
+                    message=str(e)[:200],
                 )
                 self._cooldown[rel] = time.monotonic() + self._cooldown_seconds
                 self._status.increment("error_count")
@@ -361,13 +515,7 @@ class DaemonRunner:
         except ClassifierSkipped as e:
             # 분류 가드(본문 너무 짧음 / 사용자 잠금)에 걸린 경우.
             # 오류가 아니므로 error_count 는 그대로 두고, pending.jsonl 에 사유만 남긴다.
-            self._pending.append(
-                {
-                    "path": rel,
-                    "reason": e.reason,
-                    "recorded_at": _utc_now(),
-                }
-            )
+            self._record_pending(rel, e.reason)
             # 같은 파일이 다음 rescan 마다 즉시 재진입하지 않도록 짧은 cooldown.
             self._cooldown[rel] = time.monotonic() + max(quiescence, 30.0)
             return
@@ -378,25 +526,16 @@ class DaemonRunner:
         except FileNotFoundError:
             return
         if mtime_now != mtime_before:
-            self._pending.append(
-                {
-                    "path": rel,
-                    "reason": "file_changed_during_classify",
-                    "recorded_at": _utc_now(),
-                }
-            )
+            self._record_pending(rel, "file_changed_during_classify")
             return
 
         if decision.confidence < self._opts.confidence_threshold:
-            self._pending.append(
-                {
-                    "path": rel,
-                    "reason": "low_confidence",
-                    "decision": decision.to_dict(),
-                    "recorded_at": _utc_now(),
-                }
-            )
-            self._status.increment("pending_count", last_classified_at=_utc_now())
+            if self._record_pending(
+                rel, "low_confidence", decision=decision.to_dict()
+            ):
+                self._status.increment(
+                    "pending_count", last_classified_at=_utc_now()
+                )
             return
 
         # confidence 충족 → 자동 적용
@@ -404,19 +543,15 @@ class DaemonRunner:
             record = self._writer.apply(rel, decision, move_into_category=self._opts.auto_move)
         except OSError as e:
             logger.error("frontmatter write failed for %s: %s", rel, e)
-            self._pending.append(
-                {
-                    "path": rel,
-                    "reason": "write_failed",
-                    "message": str(e),
-                    "decision": decision.to_dict(),
-                    "recorded_at": _utc_now(),
-                }
+            self._record_pending(
+                rel, "write_failed", message=str(e), decision=decision.to_dict()
             )
             self._status.increment("error_count")
             return
 
         self._applied.append(record.to_dict())
+        # 적용 성공 — 이후 같은 파일이 다른 사유로 pending 되면 다시 기록되도록 해제.
+        self._pending_logged.pop(rel, None)
         try:
             # 다중 worker 동시 reindex로 인한 LanceDB 매니페스트 race 방지.
             # 분류 INFO 적용 자체는 worker별로 병렬이지만, 인덱스 갱신은 순차.
@@ -437,14 +572,7 @@ class DaemonRunner:
                 last_reindex_error=str(e),
                 last_reindex_error_at=_utc_now(),
             )
-            self._pending.append(
-                {
-                    "path": record.path_after,
-                    "reason": "reindex_failed",
-                    "message": str(e),
-                    "recorded_at": _utc_now(),
-                }
-            )
+            self._record_pending(record.path_after, "reindex_failed", message=str(e))
         self._status.increment("applied_count", last_classified_at=_utc_now())
 
 

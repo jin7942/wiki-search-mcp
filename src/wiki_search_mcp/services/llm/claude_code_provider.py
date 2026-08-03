@@ -88,10 +88,10 @@ class ClaudeCodeProvider:
             cli_path=cli_path,
         )
 
-    async def _drain(self, prompt: str) -> str:
+    async def _drain(self, prompt: str, opts: Any | None = None) -> str:
         """SDK ``query()`` 결과를 끝까지 소비하고 텍스트 블록을 concat."""
         text_parts: list[str] = []
-        async for msg in query(prompt=prompt, options=self._opts):
+        async for msg in query(prompt=prompt, options=opts or self._opts):
             if isinstance(msg, AssistantMessage):
                 for blk in msg.content:
                     if isinstance(blk, TextBlock):
@@ -123,25 +123,32 @@ class ClaudeCodeProvider:
         overflow = attempt - (len(seq) - 1)
         return seq[-1] * (2.0**overflow)
 
-    async def classify(self, req: ClassificationRequest) -> ClassificationDecision:
-        prompt = build_user_prompt(req)
+    async def _invoke_with_retry(
+        self, prompt: str, opts: Any, *, label: str
+    ) -> str:
+        """LLM 1회 호출 (transient 실패는 exponential backoff 재시도).
 
-        # transient 실패(타임아웃 / 네트워크·프로세스 오류)는 exponential backoff
-        # 로 재시도한다. 운영 로그상 단발 타임아웃 1회로 파일이 600초 cooldown 후
-        # 사실상 영구 pending 되던 문제를 완화한다. CLI 미설치는 재시도 무의미.
+        타임아웃 / 네트워크·프로세스 오류는 재시도하고, CLI 미설치는 즉시
+        실패시킨다. 운영 로그상 단발 타임아웃 1회로 파일이 600초 cooldown 후
+        사실상 영구 pending 되던 문제를 완화한다.
+
+        Args:
+            prompt: user prompt.
+            opts: ``ClaudeAgentOptions``.
+            label: 로그 식별용 (대상 경로 등).
+
+        Returns:
+            LLM 응답 텍스트 (파싱은 호출자 책임 — 파싱 오류는 재시도 대상 아님).
+
+        Raises:
+            ClassifierError: 재시도 소진 또는 재시도 불가 오류.
+        """
         last_err: ClassifierError | None = None
         attempts = self._max_retries + 1
         for attempt in range(attempts):
             try:
-                text = await asyncio.wait_for(
-                    self._drain(prompt), timeout=self._timeout_s
-                )
-                return parse_decision(
-                    path=req.path,
-                    raw=text,
-                    provider=f"{self.name}:{self._model}",
-                    active_categories=req.active_categories,
-                    subfolders_by_category=dict(req.subfolders_by_category or {}),
+                return await asyncio.wait_for(
+                    self._drain(prompt, opts), timeout=self._timeout_s
                 )
             except asyncio.TimeoutError as e:
                 last_err = ClassifierError.of(
@@ -166,18 +173,47 @@ class ClaudeCodeProvider:
             if attempt < attempts - 1:
                 backoff = self._backoff_for(attempt)
                 logger.warning(
-                    "LLM classify transient failure (%s), retry %d/%d after %.1fs: %s",
+                    "LLM call transient failure (%s), retry %d/%d after %.1fs: %s",
                     getattr(last_err.context, "code", "?") if last_err.context else "?",
                     attempt + 1,
                     self._max_retries,
                     backoff,
-                    req.path,
+                    label,
                 )
                 await asyncio.sleep(backoff)
 
         # 모든 시도 소진.
         assert last_err is not None
         raise last_err
+
+    async def classify(self, req: ClassificationRequest) -> ClassificationDecision:
+        prompt = build_user_prompt(req)
+        text = await self._invoke_with_retry(prompt, self._opts, label=req.path)
+        return parse_decision(
+            path=req.path,
+            raw=text,
+            provider=f"{self.name}:{self._model}",
+            active_categories=req.active_categories,
+            subfolders_by_category=dict(req.subfolders_by_category or {}),
+        )
+
+    async def complete(self, prompt: str, *, system_prompt: str) -> str:
+        """분류 외 단발 텍스트 호출 (계층화 검증 등).
+
+        ``classify`` 와 동일한 타임아웃/재시도 정책을 쓴다.
+
+        Raises:
+            ClassifierError: 호출 실패.
+        """
+        opts = ClaudeAgentOptions(
+            model=self._model,
+            max_turns=1,
+            system_prompt=system_prompt,
+            tools=[],
+            permission_mode="dontAsk",
+            cli_path=self._opts.cli_path,
+        )
+        return await self._invoke_with_retry(prompt, opts, label="complete")
 
     async def healthcheck(self) -> None:
         """간단한 ping 호출로 OAuth + CLI 정상 여부 확인.

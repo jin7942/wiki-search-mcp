@@ -3,6 +3,66 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.7.0] - 2026-08-03
+
+프로젝트 폴더 평면 누적 문제를 해소했다. 기존 서브폴더를 분류 목적지로 학습하고
+(R1), health_check 임계 초과 폴더를 daemon 이 주기적으로 계층화하며(R2),
+클러스터링 품질을 시리즈/문서유형/태그 3단계 우선순위로 개선하고(R3), 파일명
+날짜 정규화를 실제 적용 가능한 루프로 승격했다(R4). 선행 전제였던 rate limiter
+정책 결함(pending 1650건 전수 rate_limited, applied 0)도 근본 수정했다.
+테스트 782 → 811.
+
+### Added
+
+- **계층화 파이프라인 (`HierarchizationService`)**: 휴리스틱 초안
+  (`suggest_subfolders`) → LLM 정제(`complete` + 창작 파일 제거·중복 할당
+  제거·동어반복 그룹명 거부 파서) → confidence 산출의 2단 계획(plan)과, 서브폴더
+  생성 + 파일 이동 + subcategory frontmatter 갱신 + inbound wikilink 보정 +
+  applied.jsonl 기록(rollback 호환)을 일관 수행하는 적용(apply)을 제공한다.
+  LLM 실패 시 휴리스틱 계획(confidence 0.0)으로 폴백해 승인 대기 흐름을 탄다.
+- **daemon 구조 패스 (`_structure_pass`)**: `hierarchize_interval_seconds`
+  (기본 6시간) 주기로 health_check 를 돌려 임계(`hierarchize_threshold_flat`,
+  기본 10) 초과 평면 폴더를 계획한다. `auto_hierarchize` 이고 confidence ≥
+  threshold 면 자동 적용 + 증분 재인덱싱, 미만이면 pending.jsonl 에
+  ``hierarchization`` 항목으로 승인 대기 — 분류 파이프라인과 동일 정책.
+  폴더별 86400초 쿨다운으로 매 주기 LLM 재계획을 막는다.
+- **CLI `daemon hierarchize`**: 수동 계층화(--folder/--dry-run/
+  --min-cluster-size/--threshold-flat/--llm-model/--no-llm/--force). 수동 실행은
+  그 자체가 승인이므로 confidence 게이트 없이 적용하고 증분 재인덱싱한다.
+- **CLI `daemon normalize-filenames`**: `suggest_filename_normalization` 후보를
+  실제 rename 으로 적용(R4). wikilink 보정 + applied.jsonl 기록으로 rollback
+  가능. daemon 구조 패스는 후보를 pending(``filename_normalization``)으로
+  노출만 하고 자동 적용하지 않는다.
+- **`FrontmatterWriter.move_to`**: rename/계층화용 명시적 이동. 본문·frontmatter
+  보존(+subcategory/updated 만 갱신), 충돌 회피(-1 접미사), inbound wikilink
+  보정, AppliedRecord 기록 — `daemon rollback` 과 호환(E2E 검증).
+- **`ClaudeCodeProvider.complete`**: 범용 텍스트 완성 호출. classify 와 동일한
+  타임아웃/지수 백오프 재시도 정책을 `_invoke_with_retry` 로 공유한다.
+
+### Changed
+
+- **분류 목적지에 기존 서브폴더 포함 (R1)**: `CategoryService.list_subfolders`
+  가 카테고리 하위 2-depth 중첩 경로(``KT_ITPARK/인수인계``)까지 반환하고,
+  분류 프롬프트가 중첩 subcategory("proj/meetings", 가장 깊은 항목 선호)를
+  안내하며, `decide_target_path` 의 '제자리' 판정을 중첩 경로로 일반화했다.
+  사용자가 직접 만든 서브폴더 구조를 daemon 이 학습해 신규 문서를 바로 그
+  안으로 분류한다.
+- **클러스터링 품질 3단계 우선순위 (R3)**: `suggest_subfolders` 가 (1) 넘버링
+  시리즈(``NN-`` prefix, 날짜 제외)를 한 그룹으로 고정 — 분리 금지, (2) 문서
+  유형 축(자격증명/회의록/보고서/가이드/메모, 날짜 prefix=회의록 추정), (3)
+  잔여 파일만 태그 클러스터(기존 greedy) 순으로 묶는다. 폴더 경로에서 유도한
+  동어반복 토큰(``kt``, ``itpark``, ``kt-itpark`` 등 결합 변형 포함)은 신호에서
+  제외 — "이미 그 폴더 이름인 태그" 로 서브폴더를 만드는 무의미 제안 차단.
+
+### Fixed
+
+- **rate 예산 전소 3중 수정 (P0)**: (1) rate 슬롯을 worker dequeue 시점이 아닌
+  LLM 호출 직전에만 소비 — too_short/user_locked 가드나 quiescence 로 스킵되는
+  파일이 일일 예산을 전소시키던 병리 제거. (2) RateLimitError 의 cooldown 을
+  ``max(기본 600초, wait_seconds)`` 로 — 일일 한도 소진(3만초 대기)을 600초마다
+  헛 재시도하던 것 차단. (3) pending.jsonl 에 같은 path+reason 연속 기록 dedup
+  — 동일 사유 1650건 중복 누적 차단, 적용 성공 시 dedup 키 해제.
+
 ## [0.6.1] - 2026-06-17
 
 ### Fixed

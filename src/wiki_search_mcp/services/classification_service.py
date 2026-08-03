@@ -254,12 +254,18 @@ class ClassificationService:
     ) -> SubfolderSuggestion:
         """평면 폴더의 서브폴더 계층화 제안(read-only).
 
-        폴더 직계 .md 파일들의 frontmatter 태그 + 본문 키워드를 모아 공통
-        신호로 그룹을 만든다. ``min_cluster_size`` 이상 묶이는 신호만 서브폴더
-        후보가 된다. 큰 그룹부터 파일을 선점(greedy)해 한 파일이 여러 그룹에
-        중복되지 않게 한다. 어느 그룹에도 못 든 파일은 ``unclassified``.
+        신호 우선순위 (강한 구조 신호부터 선점, 한 파일은 한 그룹에만):
 
-        실제 폴더 생성/이동은 하지 않는다(보고서 #1/#3, read-only 정책 유지).
+        1. **넘버링 시리즈**: ``00-`` ~ ``NN-`` prefix 파일명은 의도된 문서
+           시리즈이므로 분리하지 않고 한 그룹으로 유지한다 (날짜 prefix 제외).
+        2. **문서 유형 축**: 파일명 휴리스틱으로 자격증명/회의록/보고서/가이드/
+           메모를 감지한다. 날짜 prefix 파일명은 회의록으로 추정한다.
+        3. **태그/키워드 클러스터**: frontmatter 태그 + 본문 키워드 공통 신호.
+           폴더 경로와 동어반복인 신호(예: ``KT_ITPARK`` 폴더의 ``kt`` 태그)는
+           변별력이 없으므로 제외한다.
+
+        ``min_cluster_size`` 이상 묶이는 그룹만 후보. 어느 그룹에도 못 든
+        파일은 ``unclassified``. 실제 폴더 생성/이동은 하지 않는다(read-only).
 
         Args:
             folder_path: 대상 폴더 상대 경로(pages 기준). 예: ``"projects/KT_ITPARK"``.
@@ -291,10 +297,33 @@ class ClassificationService:
                 ),
             )
 
-        signals = {rel: self._collect_signals(rel) for rel in files}
-        groups, unclassified = self._cluster_by_signal(
-            files, signals, min_cluster_size
+        stop = self._folder_stop_signals(normalized)
+        groups: list[SubfolderGroup] = []
+        remaining = list(files)
+
+        # 1) 넘버링 시리즈 — 분리 금지, 한 그룹으로 선점.
+        series = self._extract_series_group(remaining, stop, min_cluster_size)
+        if series is not None:
+            groups.append(series)
+            taken = set(series.files)
+            remaining = [f for f in remaining if f not in taken]
+
+        # 2) 문서 유형 축 (파일명 휴리스틱).
+        type_groups, remaining = self._group_by_doc_type(
+            remaining, min_cluster_size
         )
+        groups.extend(type_groups)
+
+        # 3) 잔여 파일은 태그/키워드 클러스터 (동어반복 신호 제외).
+        signals = {
+            rel: self._collect_signals(rel) - stop for rel in remaining
+        }
+        tag_groups, unclassified = self._cluster_by_signal(
+            remaining, signals, min_cluster_size
+        )
+        groups.extend(tag_groups)
+
+        groups.sort(key=lambda g: (-len(g.files), g.name))
 
         if not groups:
             reasoning = (
@@ -314,6 +343,126 @@ class ClassificationService:
             unclassified=tuple(unclassified),
             reasoning=reasoning,
         )
+
+    # 문서 유형 축 — 파일명 키워드 → 서브폴더 이름. 순서 = 우선순위
+    # (여러 유형이 매치되면 앞선 유형이 이긴다).
+    _DOC_TYPE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+        ("자격증명", re.compile(r"자격증명|credential|계정|password|암호", re.IGNORECASE)),
+        ("회의록", re.compile(r"회의|미팅|meeting", re.IGNORECASE)),
+        ("보고서", re.compile(r"보고서|검토|리뷰|report|review", re.IGNORECASE)),
+        (
+            "가이드",
+            re.compile(
+                r"가이드|매뉴얼|설치|접속|설정|튜토리얼|guide|manual|tutorial|howto",
+                re.IGNORECASE,
+            ),
+        ),
+        ("메모", re.compile(r"메모|임시|memo|scratch", re.IGNORECASE)),
+    )
+
+    # 넘버링 시리즈 prefix: 1~2자리 숫자 + 구분자. 날짜 prefix 는 별도 제외.
+    _SERIES_PREFIX_RE = re.compile(r"^\d{1,2}[-_.]\s*\D")
+
+    @staticmethod
+    def _folder_stop_signals(normalized: str) -> set[str]:
+        """폴더 경로와 동어반복이라 변별력 없는 신호 집합.
+
+        경로 각 컴포넌트의 소문자형 + 구분자 분해 토큰 + 결합 변형을 모두
+        제외 대상으로 만든다. 예: ``projects/KT_ITPARK`` →
+        ``{projects, kt_itpark, kt, itpark, kt-itpark, ktitpark}``.
+        """
+        stop: set[str] = set()
+        for comp in normalized.split("/"):
+            comp_l = comp.strip().lower()
+            if not comp_l:
+                continue
+            stop.add(comp_l)
+            tokens = [t for t in re.split(r"[-_.\s]+", comp_l) if t]
+            stop.update(tokens)
+            if len(tokens) > 1:
+                stop.add("-".join(tokens))
+                stop.add("_".join(tokens))
+                stop.add("".join(tokens))
+        return stop
+
+    @classmethod
+    def _detect_doc_type(cls, rel_path: str) -> str | None:
+        """파일명 휴리스틱으로 문서 유형 감지. 못 찾으면 None.
+
+        키워드 매치가 날짜 prefix 추정보다 우선한다 (``2026-05-19 검토 보고서``
+        는 보고서). 키워드 없이 날짜 prefix 만 있으면 회의록으로 추정한다.
+        """
+        stem = Path(rel_path).stem
+        for type_name, pat in cls._DOC_TYPE_RULES:
+            if pat.search(stem):
+                return type_name
+        if cls._parse_date_prefix(stem) is not None:
+            return "회의록"
+        return None
+
+    def _extract_series_group(
+        self, files: list[str], stop: set[str], min_cluster_size: int
+    ) -> SubfolderGroup | None:
+        """넘버링 시리즈(``NN-`` prefix) 파일들을 한 그룹으로 추출.
+
+        날짜 prefix(``26.05.11`` 등)는 시리즈가 아니라 회의록 신호이므로 제외.
+        임계 미만이면 None (시리즈로 취급하지 않음).
+        """
+        members: list[str] = []
+        for rel in files:
+            stem = Path(rel).stem
+            if self._parse_date_prefix(stem) is not None:
+                continue
+            if self._SERIES_PREFIX_RE.match(stem):
+                members.append(rel)
+        if len(members) < min_cluster_size:
+            return None
+        members.sort()
+        return SubfolderGroup(
+            name=self._series_group_name(members, stop),
+            files=tuple(members),
+            signal=f"파일명 넘버링 시리즈 ({len(members)}개, 분리 금지)",
+        )
+
+    def _series_group_name(self, members: list[str], stop: set[str]) -> str:
+        """시리즈 그룹 이름 — 멤버 공통 태그/키워드 중 최다 빈도, 없으면 '시리즈'."""
+        counter: Counter[str] = Counter()
+        for rel in members:
+            for sig in self._collect_signals(rel) - stop:
+                counter[sig] += 1
+        ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        if ranked and ranked[0][1] >= 2:
+            return ranked[0][0]
+        return "시리즈"
+
+    @classmethod
+    def _group_by_doc_type(
+        cls, files: list[str], min_cluster_size: int
+    ) -> tuple[list[SubfolderGroup], list[str]]:
+        """문서 유형 축으로 그룹핑. 임계 미달 유형의 파일은 잔여로 돌려준다."""
+        by_type: dict[str, list[str]] = {}
+        for rel in files:
+            doc_type = cls._detect_doc_type(rel)
+            if doc_type is not None:
+                by_type.setdefault(doc_type, []).append(rel)
+
+        groups: list[SubfolderGroup] = []
+        assigned: set[str] = set()
+        for type_name, _ in cls._DOC_TYPE_RULES:
+            members = by_type.get(type_name, [])
+            if len(members) < min_cluster_size:
+                continue
+            members.sort()
+            assigned.update(members)
+            groups.append(
+                SubfolderGroup(
+                    name=type_name,
+                    files=tuple(members),
+                    signal=f"문서 유형 '{type_name}' ({len(members)}개)",
+                )
+            )
+        remaining = [f for f in files if f not in assigned]
+        return groups, remaining
 
     def _list_direct_md(self, folder: Path, normalized: str) -> list[str]:
         """폴더 직계(하위 폴더 제외) .md 파일의 pages 기준 상대 경로."""
@@ -595,14 +744,12 @@ class ClassificationService:
         )
 
     @classmethod
-    def _standardize_date_prefix(
-        cls, name: str
-    ) -> tuple[str | None, str]:
-        """파일명 선두 날짜를 ``YYYY-MM-DD`` 로 치환.
+    def _parse_date_prefix(cls, name: str) -> tuple[str, str] | None:
+        """파일명 선두의 날짜 표기 파싱.
 
         Returns:
-            ``(정규화된 이름 또는 None, 매칭된 원본 날짜 문자열)``.
-            날짜를 못 찾으면 ``(None, "")``.
+            ``(표준 YYYY-MM-DD, 매칭된 원본 문자열)``. 날짜가 아니면 None.
+            월/일 범위를 벗어나면 날짜 아님으로 간주한다.
         """
         for pat in cls._DATE_PATTERNS:
             m = pat.match(name)
@@ -620,22 +767,35 @@ class ClassificationService:
             else:
                 y, mo, d = gd["y"], gd["m"], gd["d"]
 
-            # 유효성: 월 1-12, 일 1-31. 벗어나면 날짜 아님으로 간주.
             try:
                 im, idd = int(mo), int(d)
             except ValueError:
-                return None, ""
+                return None
             if not (1 <= im <= 12 and 1 <= idd <= 31):
-                return None, ""
+                return None
 
-            std_date = f"{y}-{im:02d}-{idd:02d}"
-            matched = m.group(0)
-            rest = name[m.end():].lstrip(" ._-")
-            new_name = f"{std_date} {rest}".rstrip() if rest else std_date
-            if new_name == name:
-                return None, ""
-            return new_name, matched
-        return None, ""
+            return f"{y}-{im:02d}-{idd:02d}", m.group(0)
+        return None
+
+    @classmethod
+    def _standardize_date_prefix(
+        cls, name: str
+    ) -> tuple[str | None, str]:
+        """파일명 선두 날짜를 ``YYYY-MM-DD`` 로 치환.
+
+        Returns:
+            ``(정규화된 이름 또는 None, 매칭된 원본 날짜 문자열)``.
+            날짜를 못 찾았거나 이미 표준형이면 ``(None, "")``.
+        """
+        parsed = cls._parse_date_prefix(name)
+        if parsed is None:
+            return None, ""
+        std_date, matched = parsed
+        rest = name[len(matched):].lstrip(" ._-")
+        new_name = f"{std_date} {rest}".rstrip() if rest else std_date
+        if new_name == name:
+            return None, ""
+        return new_name, matched
 
     def _load_content(self, normalized_path: str) -> str:
         """분류용 본문 로드.

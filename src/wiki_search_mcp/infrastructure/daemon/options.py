@@ -34,6 +34,13 @@ class DaemonOptions:
         rescan_interval_seconds: 외부 FS 이벤트가 없어도 daemon이 스스로 ``_rescan()`` 을
             호출하는 주기(초). 0 이하면 비활성. cooldown 만료 후 영원히 안 깨어나는
             문제를 방지.
+        hierarchize_interval_seconds: 구조 유지 태스크(평면 누적 폴더 계층화 +
+            파일명 정규화 후보 노출) 주기(초). 0 이하면 비활성.
+        hierarchize_threshold_flat: 계층화 대상 판정 임계 (폴더 직계 .md 수,
+            ``wiki_health_check`` 와 동일 의미).
+        auto_hierarchize: True 면 계층화 계획의 confidence 가
+            ``confidence_threshold`` 이상일 때 자동 적용. False 면 항상
+            pending.jsonl 승인 대기로만 기록.
         auto_move: 카테고리 폴더로 이동 여부
         rewrite_inbound_links: 파일 이동 시 다른 파일 본문에 박힌 wikilink(``[[옛 경로]]``)
             를 새 경로로 일괄 보정할지 여부. 깨진 링크 누적 방지.
@@ -56,6 +63,9 @@ class DaemonOptions:
     quiescence_seconds: float = 60.0
     min_body_chars: int = 200
     rescan_interval_seconds: float = 300.0
+    hierarchize_interval_seconds: float = 21600.0
+    hierarchize_threshold_flat: int = 10
+    auto_hierarchize: bool = True
     auto_move: bool = True
     rewrite_inbound_links: bool = True
     log_level: str = "INFO"

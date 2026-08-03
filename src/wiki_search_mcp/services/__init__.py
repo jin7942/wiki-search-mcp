@@ -56,6 +56,10 @@ def __getattr__(name: str):
         from .classification_service import ClassificationService
 
         return ClassificationService
+    if name == "HierarchizationService":
+        from .hierarchization_service import HierarchizationService
+
+        return HierarchizationService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -69,4 +73,5 @@ __all__ = [
     "QueryExpander",
     "CategoryService",
     "ClassificationService",
+    "HierarchizationService",
 ]

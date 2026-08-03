@@ -181,6 +181,18 @@ def _passthrough_args(kw: dict) -> list[str]:
         args += ["--min-body-chars", str(kw["min_body_chars"])]
     if kw.get("rescan_interval_seconds") not in (None, 300.0):
         args += ["--rescan-interval-seconds", str(kw["rescan_interval_seconds"])]
+    if kw.get("hierarchize_interval_seconds") not in (None, 21600.0):
+        args += [
+            "--hierarchize-interval-seconds",
+            str(kw["hierarchize_interval_seconds"]),
+        ]
+    if kw.get("hierarchize_threshold_flat") not in (None, 10):
+        args += [
+            "--hierarchize-threshold-flat",
+            str(kw["hierarchize_threshold_flat"]),
+        ]
+    if kw.get("auto_hierarchize") is False:
+        args += ["--no-auto-hierarchize"]
     if kw.get("auto_move") is False:
         args += ["--no-auto-move"]
     if kw.get("rewrite_inbound_links") is False:
@@ -203,6 +215,9 @@ def _build_options(wiki: Path, kw: dict) -> DaemonOptions:
         quiescence_seconds=kw["quiescence_seconds"],
         min_body_chars=kw["min_body_chars"],
         rescan_interval_seconds=kw["rescan_interval_seconds"],
+        hierarchize_interval_seconds=kw["hierarchize_interval_seconds"],
+        hierarchize_threshold_flat=kw["hierarchize_threshold_flat"],
+        auto_hierarchize=kw["auto_hierarchize"],
         auto_move=kw["auto_move"],
         rewrite_inbound_links=kw["rewrite_inbound_links"],
         log_level=kw["log_level"],
@@ -296,6 +311,26 @@ def daemon() -> None:
     default=300.0,
     show_default=True,
     help="외부 FS 이벤트 없이도 daemon이 스스로 rescan하는 주기 (0이면 비활성)",
+)
+@click.option(
+    "--hierarchize-interval-seconds",
+    type=float,
+    default=21600.0,
+    show_default=True,
+    help="평면 누적 폴더 계층화 등 구조 유지 태스크 주기 (0이면 비활성)",
+)
+@click.option(
+    "--hierarchize-threshold-flat",
+    type=int,
+    default=10,
+    show_default=True,
+    help="계층화 대상 판정 임계 (폴더 직계 .md 수)",
+)
+@click.option(
+    "--auto-hierarchize/--no-auto-hierarchize",
+    default=True,
+    show_default=True,
+    help="confidence 충족 시 계층화 자동 적용 여부 (끄면 항상 승인 대기)",
 )
 @click.option("--auto-move/--no-auto-move", default=True, show_default=True)
 @click.option(
@@ -612,6 +647,182 @@ def reclassify(
             indent=2,
         )
     )
+
+
+@daemon.command("hierarchize")
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
+@click.option("--folder", default=None, help="특정 폴더만 대상 (기본: health_check 임계 초과 전체)")
+@click.option("--dry-run", is_flag=True, help="실제 이동 없이 계획만 표시")
+@click.option("--min-cluster-size", type=int, default=3, show_default=True, help="서브폴더 최소 파일 수")
+@click.option("--threshold-flat", type=int, default=10, show_default=True, help="계층화 대상 판정 임계 (직계 .md 수)")
+@click.option("--llm-model", default="haiku", show_default=True, help="Claude 모델 alias 또는 풀 ID")
+@click.option("--no-llm", is_flag=True, help="LLM 검증 없이 휴리스틱 계획 그대로 사용")
+@click.option("--force", is_flag=True, help="daemon이 실행 중이어도 진행")
+def hierarchize(
+    wiki_path: str | None,
+    folder: str | None,
+    dry_run: bool,
+    min_cluster_size: int,
+    threshold_flat: int,
+    llm_model: str,
+    no_llm: bool,
+    force: bool,
+) -> None:
+    """평면 누적 폴더를 서브폴더로 계층화합니다 (수동 실행 = 승인).
+
+    daemon의 자동 계층화가 confidence 미달로 pending에 남긴 폴더를 사람이
+    검토 후 적용하는 승인 경로입니다. ``--dry-run``으로 계획(그룹/confidence)을
+    먼저 확인하세요. 수동 실행은 그 자체가 승인이므로 confidence 게이트 없이
+    적용됩니다.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    wiki = _resolve_wiki_path(wiki_path)
+    alive, pid = PidLock.is_alive(pid_file(wiki))
+    if alive and not force:
+        raise click.ClickException(
+            f"daemon이 실행 중입니다 (pid={pid}). 먼저 stop하거나 --force 사용."
+        )
+    if not no_llm:
+        _check_claude_cli_or_die()
+        _check_claude_logged_in_or_hint()
+
+    import asyncio
+
+    from wiki_search_mcp.adapters.mcp.container import ServiceContainer
+    from wiki_search_mcp.infrastructure.frontmatter.writer import FrontmatterWriter
+    from wiki_search_mcp.infrastructure.jsonl.log import JsonlLog
+    from wiki_search_mcp.services.hierarchization_service import (
+        HierarchizationService,
+    )
+
+    container = ServiceContainer(str(wiki))
+    provider = None
+    if not no_llm:
+        from wiki_search_mcp.services.llm.claude_code_provider import (
+            ClaudeCodeProvider,
+        )
+
+        provider = ClaudeCodeProvider(model=llm_model)
+    service = HierarchizationService(
+        classification_service=container.classification_service,
+        writer=FrontmatterWriter(container.pages_path),
+        applied_log=JsonlLog(applied_jsonl(wiki)),
+        pages_path=container.pages_path,
+        provider=provider,
+    )
+
+    if folder:
+        folders = [folder]
+    else:
+        report = container.classification_service.health_check(threshold_flat)
+        folders = [f.path for f in report.needs_hierarchization]
+
+    async def _run() -> list[dict]:
+        out: list[dict] = []
+        for target in folders:
+            plan = await service.plan(target, min_cluster_size=min_cluster_size)
+            entry: dict = {"folder": target, "plan": plan.to_dict()}
+            if not dry_run and plan.groups:
+                entry["results"] = service.apply(plan)
+            out.append(entry)
+        return out
+
+    entries = asyncio.run(_run())
+    moved = sum(
+        1
+        for e in entries
+        for r in e.get("results", [])
+        if r.get("status") == "moved"
+    )
+    if moved:
+        _reindex_incremental(wiki)
+    click.echo(
+        json.dumps(
+            {"dry_run": dry_run, "folders": len(folders), "moved": moved, "entries": entries},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+@daemon.command("normalize-filenames")
+@click.argument("wiki_path", type=click.Path(exists=True), required=False)
+@click.option("--folder", default=None, help="특정 폴더만 대상 (기본: 전체)")
+@click.option("--dry-run", is_flag=True, help="실제 rename 없이 후보만 표시")
+@click.option("--force", is_flag=True, help="daemon이 실행 중이어도 진행")
+def normalize_filenames(
+    wiki_path: str | None, folder: str | None, dry_run: bool, force: bool
+) -> None:
+    """파일명 선두 날짜를 표준 YYYY-MM-DD 로 통일합니다 (승인 실행).
+
+    rename 시 다른 파일 본문의 [[옛 이름]] wikilink 를 보정하고 applied.jsonl
+    에 기록하므로 ``daemon rollback`` 으로 되돌릴 수 있습니다.
+
+    WIKI_PATH 생략 시 config 등록 정보에서 자동 탐지.
+    """
+    wiki = _resolve_wiki_path(wiki_path)
+    alive, pid = PidLock.is_alive(pid_file(wiki))
+    if alive and not force:
+        raise click.ClickException(
+            f"daemon이 실행 중입니다 (pid={pid}). 먼저 stop하거나 --force 사용."
+        )
+
+    from wiki_search_mcp.adapters.mcp.container import ServiceContainer
+    from wiki_search_mcp.infrastructure.frontmatter.writer import FrontmatterWriter
+    from wiki_search_mcp.infrastructure.jsonl.log import JsonlLog
+
+    container = ServiceContainer(str(wiki))
+    norm = container.classification_service.suggest_filename_normalization(folder)
+
+    results: list[dict] = []
+    if not dry_run:
+        writer = FrontmatterWriter(container.pages_path)
+        applied_log = JsonlLog(applied_jsonl(wiki))
+        for cand in norm.candidates:
+            try:
+                record = writer.move_to(
+                    cand.current, cand.suggested, op="filename_normalization"
+                )
+            except (FileNotFoundError, OSError) as e:
+                results.append(
+                    {"path": cand.current, "status": "error", "reason": str(e)}
+                )
+                continue
+            applied_log.append(record.to_dict())
+            results.append(
+                {
+                    "path": cand.current,
+                    "path_after": record.path_after,
+                    "status": "renamed",
+                }
+            )
+
+    renamed = sum(1 for r in results if r.get("status") == "renamed")
+    if renamed:
+        _reindex_incremental(wiki)
+    click.echo(
+        json.dumps(
+            {
+                "dry_run": dry_run,
+                "candidates": [c.to_dict() for c in norm.candidates],
+                "renamed": renamed,
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def _reindex_incremental(wiki: Path) -> None:
+    """이동/rename 후 증분 재인덱싱 (실패해도 명령 자체는 성공 처리)."""
+    from wiki_search_mcp.infrastructure.indexing import WikiIndexer
+
+    try:
+        WikiIndexer(str(wiki)).reindex(full=False)
+    except Exception as e:  # noqa: BLE001 - 인덱스 갱신 실패는 다음 reindex 에서 복구
+        click.echo(f"[주의] 재인덱싱 실패 (다음 reindex 에서 복구됨): {e}", err=True)
 
 
 @daemon.command("install")

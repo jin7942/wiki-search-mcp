@@ -29,7 +29,9 @@ Rules (strict):
   If none fits, use the literal string "uncategorized".
 - "subcategory":
   - If the user provides subfolders_by_category[category] and one clearly fits the note,
-    set it to that exact subfolder name. The note will be placed at
+    set it to that exact subfolder entry. Entries may be nested paths like
+    "proj/meetings" — when both a folder and its subfolder fit, prefer the deepest
+    (most specific) entry. The note will be placed at
     <category>/<subcategory>/<basename>.
   - Otherwise, set it to null. Do NOT invent new subfolders.
 - "tags": 1 to 5 short lowercase tokens that describe the note topic. No leading '#'.
@@ -63,6 +65,133 @@ def build_user_prompt(req: ClassificationRequest) -> str:
         f"---\n"
         f"Return only the JSON object."
     )
+
+
+HIERARCHIZE_SYSTEM_PROMPT = """\
+You review a proposed subfolder structure for one flat wiki folder and return the
+final plan. The goal is grouping documents by TYPE or TOPIC so the folder stays
+navigable.
+
+Rules (strict):
+- Output a single JSON object only. No prose, no markdown fence, no comments.
+- Schema: {"groups": [{"name": str, "files": [str, ...]}, ...],
+           "confidence": number, "reasoning": str}
+- Every file you place MUST be one of the provided files (exact string match).
+  Never invent files. A file may appear in at most one group. Files you leave
+  out stay in the folder root (that is fine for ambiguous ones).
+- "name": short folder name in the same language as the filenames. No '/', no
+  leading dot. Prefer the heuristic group names when they fit.
+- Keep numbered series files (00-, 01-, ... prefixes) together in ONE group.
+- Do not create a group named after the folder itself (tautology).
+- Groups with fewer than 2 files are not worth a folder — leave those files out.
+- "confidence": float in [0.0, 1.0]. Use >=0.7 only when the grouping is clearly
+  right for at least 80% of the files.
+- "reasoning": one short sentence (<= 200 chars) in the language of the notes.
+"""
+
+
+def build_hierarchize_prompt(
+    folder: str,
+    files: tuple[str, ...] | list[str],
+    heuristic_groups: list[dict[str, Any]],
+) -> str:
+    """계층화 검증용 user prompt 생성.
+
+    Args:
+        folder: 대상 폴더 상대 경로.
+        files: 폴더 직계 .md 파일 basename 목록 (LLM 이 이 안에서만 선택).
+        heuristic_groups: ``SubfolderGroup.to_dict()`` 목록 (휴리스틱 초안).
+    """
+    return (
+        f"folder: {folder}\n"
+        f"files: {json.dumps(list(files), ensure_ascii=False)}\n"
+        f"heuristic_groups: {json.dumps(heuristic_groups, ensure_ascii=False)}\n"
+        f"Return only the JSON object."
+    )
+
+
+_SUBFOLDER_NAME_BAD = re.compile(r"[/\\]|^\.|\.\.")
+
+
+def parse_hierarchization(
+    *,
+    raw: str,
+    allowed_files: tuple[str, ...] | list[str],
+) -> tuple[list[dict[str, Any]], float, str]:
+    """LLM 계층화 응답 파싱 + 검증.
+
+    검증 정책:
+    - ``allowed_files`` 밖의 파일은 버린다 (LLM 창작 방지).
+    - 한 파일은 첫 등장 그룹에만 남긴다.
+    - 그룹 이름에 경로 구분자/선행 점이 있으면 그 그룹을 버린다.
+    - 검증 후 파일 2개 미만 그룹은 버린다.
+
+    Returns:
+        ``(groups, confidence, reasoning)`` — groups 는
+        ``[{"name": str, "files": [str, ...]}]``.
+
+    Raises:
+        ClassifierError: JSON 파싱/필드 검증 실패.
+    """
+    if not raw or not raw.strip():
+        raise ClassifierError.of("empty LLM response", code="INVALID_JSON")
+    m = _JSON_PATTERN.search(raw)
+    if not m:
+        raise ClassifierError.of(
+            "no JSON object in response",
+            code="INVALID_JSON",
+            details={"raw_excerpt": raw[:200]},
+        )
+    try:
+        obj: Any = json.loads(m.group(0))
+    except json.JSONDecodeError as e:
+        raise ClassifierError.of(
+            f"invalid JSON: {e}",
+            code="INVALID_JSON",
+            details={"raw_excerpt": raw[:200]},
+        ) from e
+    if not isinstance(obj, dict):
+        raise ClassifierError.of("response is not a JSON object", code="INVALID_JSON")
+
+    groups_raw = obj.get("groups")
+    confidence_raw = obj.get("confidence")
+    reasoning = obj.get("reasoning", "")
+    if not isinstance(groups_raw, list):
+        raise ClassifierError.of("'groups' must be a list", code="INVALID_FIELDS")
+    if not isinstance(confidence_raw, (int, float)):
+        raise ClassifierError.of("'confidence' must be number", code="INVALID_FIELDS")
+    if not isinstance(reasoning, str):
+        reasoning = str(reasoning)
+
+    allowed = set(allowed_files)
+    assigned: set[str] = set()
+    groups: list[dict[str, Any]] = []
+    for g in groups_raw:
+        if not isinstance(g, dict):
+            continue
+        name = g.get("name")
+        files = g.get("files")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        if _SUBFOLDER_NAME_BAD.search(name):
+            logger.warning("dropping group with invalid folder name %r", name)
+            continue
+        if not isinstance(files, list):
+            continue
+        members = []
+        for f in files:
+            if isinstance(f, str) and f in allowed and f not in assigned:
+                members.append(f)
+                assigned.add(f)
+        if len(members) < 2:
+            for f in members:
+                assigned.discard(f)
+            continue
+        groups.append({"name": name, "files": members})
+
+    confidence = max(0.0, min(1.0, float(confidence_raw)))
+    return groups, confidence, reasoning[:300]
 
 
 _JSON_PATTERN = re.compile(r"\{.*\}", re.DOTALL)

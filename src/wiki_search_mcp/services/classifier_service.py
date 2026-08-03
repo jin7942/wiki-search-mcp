@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -64,13 +65,23 @@ class ClassifierService:
         pages_path: Path,
         body_preview_chars: int = DEFAULT_BODY_PREVIEW_CHARS,
         min_body_chars: int = DEFAULT_MIN_BODY_CHARS,
+        rate_acquire: Callable[[], Awaitable[None]] | None = None,
     ):
+        """ClassifierService.
+
+        Args:
+            rate_acquire: LLM 호출 직전에 await 되는 rate-limit 슬롯 획득 함수.
+                가드(too_short/user_locked)에 걸려 LLM 을 호출하지 않는 파일이
+                일일 호출 예산을 소모하지 않도록, 호출 지점을 가드 이후로 둔다.
+                ``RateLimitError`` 는 그대로 전파된다.
+        """
         self._suggest = classification_service
         self._categories = category_service
         self._provider = provider
         self._pages = Path(pages_path)
         self._preview_chars = body_preview_chars
         self._min_body_chars = min_body_chars
+        self._rate_acquire = rate_acquire
 
     async def classify(self, rel_path: str) -> ClassificationDecision:
         """단일 파일에 대해 LLM 분류 호출.
@@ -130,6 +141,11 @@ class ClassifierService:
             active_categories=active,
             subfolders_by_category=subfolders,
         )
+        # rate-limit 슬롯은 실제 LLM 호출 직전에만 소비한다. 과거엔 worker 가
+        # dequeue 즉시 acquire 해 quiescence/가드 스킵도 예산을 갉아먹었고,
+        # 정체 파일이 많은 vault 에서 일일 한도가 no-op 으로 전소됐다.
+        if self._rate_acquire is not None:
+            await self._rate_acquire()
         _llm_start = time.perf_counter()
         decision = await self._provider.classify(req)
         llm_ms = round((time.perf_counter() - _llm_start) * 1000, 1)

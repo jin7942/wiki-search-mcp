@@ -194,15 +194,23 @@ class CategoryService:
 
         return suggestions
 
-    def list_subfolders(self) -> dict[str, tuple[str, ...]]:
-        """각 활성 카테고리 1-depth 서브폴더 이름 목록.
+    def list_subfolders(self, max_depth: int = 2) -> dict[str, tuple[str, ...]]:
+        """각 활성 카테고리의 서브폴더 상대 경로 목록 (중첩 포함).
 
-        분류기가 평탄(``<category>/<basename>``) 배치 대신 적절한 프로젝트 폴더로
-        라우팅할 수 있도록 LLM 프롬프트의 힌트로 사용한다. staging/ignore 폴더는 제외.
+        분류기가 평탄(``<category>/<basename>``) 배치 대신 적절한 프로젝트 폴더
+        (또는 그 하위 계층 폴더)로 라우팅할 수 있도록 LLM 프롬프트의 힌트로
+        사용한다. 사용자가 프로젝트 폴더 안에 만든 구조(예:
+        ``projects/KT_ITPARK/인수인계``)까지 목적지 후보에 포함해, 같은 유형의
+        신규 문서가 프로젝트 루트에 평면으로 쌓이지 않게 한다.
+        staging/ignore 폴더는 제외.
+
+        Args:
+            max_depth: 카테고리 기준 탐색 깊이. 2면 ``proj`` 와 ``proj/sub`` 까지.
 
         Returns:
-            ``{category: (sub1, sub2, ...)}`` — 카테고리에 서브폴더가 없으면 키 자체가
-            없을 수 있다. 정렬은 카테고리 사전순, 서브폴더 사전순.
+            ``{category: ("proj", "proj/sub", ...)}`` — 카테고리에 서브폴더가
+            없으면 키 자체가 없을 수 있다. 정렬은 카테고리/경로 사전순
+            (부모가 자식보다 먼저).
         """
         result: dict[str, tuple[str, ...]] = {}
         listing = self.list_categories()
@@ -210,23 +218,33 @@ class CategoryService:
             cat_dir = self._pages_path / cat
             if not cat_dir.is_dir():
                 continue
-            subs: list[str] = []
-            try:
-                for entry in cat_dir.iterdir():
-                    if not entry.is_dir():
-                        continue
-                    if self._ignore_matcher.should_ignore(entry):
-                        continue
-                    if is_staging_folder(entry.name):
-                        continue
-                    subs.append(entry.name)
-            except OSError as e:
-                logger.debug("list_subfolders(%s) failed: %s", cat, e)
-                continue
+            subs = self._walk_subfolders(cat_dir, prefix="", depth=max_depth)
             if subs:
                 subs.sort()
                 result[cat] = tuple(subs)
         return result
+
+    def _walk_subfolders(self, base: Path, prefix: str, depth: int) -> list[str]:
+        """``base`` 하위 폴더의 상대 경로를 ``depth`` 레벨까지 수집."""
+        if depth <= 0:
+            return []
+        out: list[str] = []
+        try:
+            for entry in base.iterdir():
+                if not entry.is_dir():
+                    continue
+                if self._ignore_matcher.should_ignore(entry):
+                    continue
+                if is_staging_folder(entry.name):
+                    continue
+                rel = f"{prefix}{entry.name}"
+                out.append(rel)
+                out.extend(
+                    self._walk_subfolders(entry, prefix=f"{rel}/", depth=depth - 1)
+                )
+        except OSError as e:
+            logger.debug("list_subfolders(%s) failed: %s", base, e)
+        return out
 
     def invalidate(self) -> None:
         """캐시 무효화. ``wiki_reindex`` 후 호출."""

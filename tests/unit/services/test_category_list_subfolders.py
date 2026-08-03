@@ -1,9 +1,9 @@
 """CategoryService.list_subfolders v0.4.0 회귀 테스트.
 
 분류기가 평탄 배치 대신 적절한 프로젝트 서브폴더로 라우팅하려면 카테고리별
-1-depth 서브폴더 트리를 LLM 에 힌트로 줘야 한다. 본 테스트는 list_subfolders 가:
+서브폴더 트리(중첩 포함)를 LLM 에 힌트로 줘야 한다. 본 테스트는 list_subfolders 가:
 
-- 각 카테고리의 1-depth 디렉토리만 반환 (재귀 X)
+- 각 카테고리의 서브폴더를 2-depth 까지 중첩 경로로 반환 (0.7.0 R1)
 - staging / ignore 패턴 폴더는 제외
 - 서브폴더 없는 카테고리는 결과 키에서 빠짐
 - 결과는 카테고리/서브폴더 모두 사전순 정렬
@@ -62,12 +62,27 @@ def test_list_subfolders_ignores_files(tmp_path: Path) -> None:
     assert subs.get("projects") == ("real",)
 
 
-def test_list_subfolders_does_not_recurse(tmp_path: Path) -> None:
+def test_list_subfolders_nested_within_depth(tmp_path: Path) -> None:
+    """0.7.0: 카테고리 하위 2-depth 까지 중첩 경로로 노출 (기존 서브폴더를
+    분류 목적지 후보에 포함 — 요청서 R1). 그 아래(3-depth)는 제외."""
     pages = tmp_path
     for cat in ("projects", "personal", "infra"):
         (pages / cat).mkdir()
     (pages / "projects" / "myproj").mkdir()
-    (pages / "projects" / "myproj" / "deep").mkdir()  # 2-depth — 노출 안 됨
+    (pages / "projects" / "myproj" / "deep").mkdir()  # 2-depth — 중첩 경로로 노출
+    (pages / "projects" / "myproj" / "deep" / "deeper").mkdir()  # 3-depth — 제외
+
+    subs = _service(pages).list_subfolders()
+    assert subs.get("projects") == ("myproj", "myproj/deep")
+
+
+def test_list_subfolders_nested_excludes_staging(tmp_path: Path) -> None:
+    """중첩 탐색에서도 staging 변형 폴더는 제외."""
+    pages = tmp_path
+    for cat in ("projects", "personal", "infra"):
+        (pages / cat).mkdir()
+    (pages / "projects" / "myproj").mkdir()
+    (pages / "projects" / "myproj" / "inbox").mkdir()  # staging — 제외
 
     subs = _service(pages).list_subfolders()
     assert subs.get("projects") == ("myproj",)

@@ -569,6 +569,41 @@ class SubfolderSuggestion:
 
 
 @dataclass(frozen=True)
+class HierarchizationPlan:
+    """한 폴더에 대한 계층화 실행 계획.
+
+    ``SubfolderSuggestion`` (휴리스틱 제안)을 LLM 이 검증/정제한 결과로,
+    confidence 가 임계 이상이면 daemon 이 자동 적용하고 미만이면 pending
+    큐에 승인 대기로 기록된다 (기존 분류 파이프라인과 동일 정책).
+
+    Attributes:
+        folder: 대상 폴더 상대 경로(pages 기준).
+        groups: 확정 그룹들 — ``name`` 이 생성될 서브폴더 이름.
+        unclassified: 이동하지 않고 평면에 남길 파일들.
+        confidence: 0.0-1.0. LLM 검증 실패/미사용 시 0.0 (자동 적용 안 됨).
+        reasoning: 계획 근거.
+        provider: 검증에 사용한 provider 식별자 (휴리스틱 단독이면 "heuristic").
+    """
+
+    folder: str
+    groups: tuple[SubfolderGroup, ...] = ()
+    unclassified: tuple[str, ...] = ()
+    confidence: float = 0.0
+    reasoning: str = ""
+    provider: str = "heuristic"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "folder": self.folder,
+            "groups": [g.to_dict() for g in self.groups],
+            "unclassified": list(self.unclassified),
+            "confidence": self.confidence,
+            "reasoning": self.reasoning,
+            "provider": self.provider,
+        }
+
+
+@dataclass(frozen=True)
 class FolderHealth:
     """평면 누적으로 계층화가 권장되는 폴더 한 건.
 

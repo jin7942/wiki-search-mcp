@@ -81,6 +81,7 @@ def decide_target_path(
     계산에 재사용하므로 public API 로 노출한다.
 
     - ``subcategory`` 가 주어지면 목적지는 ``<category>/<subcategory>/<basename>``.
+      subcategory 는 중첩 경로일 수 있다 (예: ``"KT_ITPARK/인수인계"``).
     - 그렇지 않고 첫 컴포넌트가 이미 ``category`` 면 원경로 유지.
     - 그 외엔 ``<category>/<basename>``.
     - 동일 basename이 대상에 이미 있으면 호출자가 직접 충돌 회피 (여기서는 경로만 계산).
@@ -91,7 +92,8 @@ def decide_target_path(
     sub = (subcategory or "").strip()
     if sub:
         # 이미 같은 <category>/<subcategory>/ 안에 있으면 그대로 유지.
-        if len(parts) >= 2 and parts[0] == category and parts[1] == sub:
+        # subcategory 가 중첩 경로여도 parent 비교로 동일 판정.
+        if Path(rel_path).parent == Path(category) / sub:
             return rel_path
         return str(Path(category) / sub / basename)
 
@@ -262,6 +264,7 @@ class FrontmatterWriter:
         decision: ClassificationDecision,
         *,
         move_into_category: bool = True,
+        overwrite_subcategory: bool = False,
     ) -> AppliedRecord:
         """분류 결정을 파일에 반영하고 AppliedRecord를 반환.
 
@@ -269,6 +272,9 @@ class FrontmatterWriter:
             rel_path: pages 기준 상대 경로
             decision: LLM 분류 결과
             move_into_category: True면 카테고리 폴더로 이동
+            overwrite_subcategory: True면 기존 subcategory 값을 decision 값으로
+                덮어쓴다. 계층화(폴더 구조 재편)처럼 이동 자체가 승인된 작업에서
+                사용. 기본 False (사용자 값 우선 원칙 유지).
 
         Returns:
             적용 내역을 담은 AppliedRecord (audit/rollback용)
@@ -301,7 +307,10 @@ class FrontmatterWriter:
             meta_after["category"] = decision.category
 
         # subcategory 도 사용자 값 우선 (의도적으로 비웠을 수 있으므로 key 존재 여부로 판단).
-        if decision.subcategory and "subcategory" not in meta_after:
+        # 단 계층화 등 이동이 명시 승인된 작업은 overwrite_subcategory 로 갱신.
+        if decision.subcategory and (
+            overwrite_subcategory or "subcategory" not in meta_after
+        ):
             meta_after["subcategory"] = decision.subcategory
 
         existing_tags = list(meta_after.get("tags") or [])
@@ -370,6 +379,86 @@ class FrontmatterWriter:
             frontmatter_before=dict(meta_before),
             frontmatter_after=dict(meta_after),
             decision=decision.to_dict(),
+            applied_at=meta_after["updated"],
+            sha256_before=sha,
+        )
+
+    def move_to(
+        self,
+        rel_path: str,
+        new_rel: str,
+        *,
+        subcategory: str | None = None,
+        op: str = "move",
+    ) -> AppliedRecord:
+        """파일을 명시적 목적지로 이동 (rename/계층화용).
+
+        ``apply`` 와 달리 분류 결정 없이 목적지를 그대로 쓴다. frontmatter 는
+        ``subcategory`` (주어진 경우)와 ``updated`` 만 갱신하고 본문/나머지
+        필드는 보존한다. 이동 후 다른 파일의 inbound wikilink 를 보정한다.
+
+        Args:
+            rel_path: 현재 pages 기준 상대 경로.
+            new_rel: 목적지 상대 경로. 이미 있으면 ``-1`` 접미사 등으로 회피.
+            subcategory: 갱신할 subcategory 값 (계층화 시 카테고리 기준 상대
+                경로, 예: ``"KT_ITPARK/회의록"``). None 이면 미변경.
+            op: AppliedRecord.decision.type 에 기록될 작업 식별자
+                (``"hierarchization"`` / ``"filename_normalization"`` 등).
+
+        Returns:
+            AppliedRecord (applied.jsonl / rollback 호환).
+
+        Raises:
+            FileNotFoundError: 원본이 없을 때.
+            OSError: 쓰기 실패.
+        """
+        source = self._pages / rel_path
+        content = source.read_text(encoding="utf-8")
+        meta_before, body = parse_frontmatter(content)
+        sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        meta_after: FrontmatterDict = dict(meta_before)
+        if subcategory:
+            meta_after["subcategory"] = subcategory
+        meta_after["updated"] = _utc_iso_now()
+
+        target_rel = rel_path
+        if new_rel != rel_path:
+            target_rel = _avoid_collision(self._pages, new_rel)
+
+        new_content = render_frontmatter(meta_after, body)
+        _atomic_write(self._pages / target_rel, new_content)
+        if target_rel != rel_path:
+            try:
+                source.unlink()
+            except FileNotFoundError:
+                pass
+            if self._rewrite_inbound:
+                try:
+                    rewritten = _rewrite_inbound_wikilinks(
+                        self._pages, rel_path, target_rel
+                    )
+                    if rewritten:
+                        logger.info(
+                            "rewrote inbound wikilinks in %d file(s) for %s -> %s",
+                            rewritten,
+                            rel_path,
+                            target_rel,
+                        )
+                except Exception:
+                    logger.exception(
+                        "rewrite_inbound_wikilinks failed for %s -> %s (continuing)",
+                        rel_path,
+                        target_rel,
+                    )
+
+        logger.info("moved (%s): %s -> %s", op, rel_path, target_rel)
+        return AppliedRecord(
+            path_before=rel_path,
+            path_after=target_rel,
+            frontmatter_before=dict(meta_before),
+            frontmatter_after=dict(meta_after),
+            decision={"type": op, "path": rel_path, "target": new_rel},
             applied_at=meta_after["updated"],
             sha256_before=sha,
         )
