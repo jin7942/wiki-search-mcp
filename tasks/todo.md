@@ -1,3 +1,15 @@
+# 0.7.1 — LLM 호출 예산 보호 (장애 보고서 2026-11-13, 0.6.1 운영)
+
+보고서 R1(한도 차감을 LLM 직전으로)·R3 중 중복 억제는 0.7.0 에 이미 반영됨.
+운영 장애 자체는 0.7.0 업그레이드로 해소, 아래는 0.7.0 잔여 결함.
+
+- [x] 재현 테스트(runner 단위, 실제 ClassifierService+rate limiter): 짧은 파일 5 + 긴 파일 1, 분당 5 → 긴 파일 첫 rescan 분류
+- [x] 가드/quiescence/파일 없음 경로 rate used 0 (runner 단위)
+- [x] R2 확장: 가드 skip / low_confidence 는 mtime 불변이면 재투입 금지 (low_confidence 는 24h TTL)
+- [x] R4: status `rate` 스냅샷, `pending_count` = 현재 대기 고유 path 수 + `pending_by_reason`
+- [x] R3: pending.jsonl 10MB 초과 시 path 별 최신 1건 압축 (`.prev` 백업), `daemon pending` 노출 불변
+- [x] CHANGELOG [Unreleased]
+
 # 0.7.0 — 프로젝트 폴더 평면 누적 개선 (요청서 2026-07-20)
 
 ## P0. rate limiter 정책 (선행 전제)

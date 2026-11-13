@@ -78,11 +78,7 @@ def read_daemon_pending(wiki_path: Path, limit: int = 50) -> list[dict[str, Any]
     try:
         pending = JsonlLog(pending_jsonl(wiki_path))
         applied = JsonlLog(applied_jsonl(wiki_path))
-        latest_pending: dict[str, dict] = {}
-        for entry in pending.scan():
-            path = entry.get("path")
-            if isinstance(path, str):
-                latest_pending[path] = entry
+        latest_pending = pending.latest_by("path")
         applied_paths: set[str] = set()
         for entry in applied.scan():
             for key in ("path_before", "path_after"):

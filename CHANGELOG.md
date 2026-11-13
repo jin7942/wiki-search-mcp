@@ -3,6 +3,41 @@
 이 프로젝트의 모든 주요 변경사항은 이 파일에 기록됩니다.
 포맷은 [Keep a Changelog](https://keepachangelog.com/) 기반이며 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.7.1] - 2026-11-13
+
+0.7.0 의 LLM 호출 예산 결함을 고쳤다. low_confidence 파일이 rescan 마다 같은
+본문으로 LLM 을 다시 불러 일일 한도를 독점할 수 있던 경로를 막고, 한도 소진과
+대기 현황이 상태값에 바로 드러나게 했다. 0.6.1 장애 보고서(2026-11-13: 본문
+200자 미만 파일 5개가 일일 한도 500회를 독점, 분류 가능 파일 최장 28일 미분류)의
+재현 시나리오를 runner 단위 회귀 테스트로 고정했다. 테스트 811 → 823.
+
+### Added
+
+- **status `rate` 필드**: rescan 마다 LLM 호출 한도 사용량(`per_minute`/
+  `per_hour`/`per_day`: `{limit, used}`)을 기록한다. 한도 소진은 오류로 집계되지
+  않아, 상태값만으로는 분류가 멈춘 것을 알 수 없었다.
+- **pending.jsonl 자동 압축 (`JsonlLog.compact`)**: 10MB 를 넘으면 path 별 최신
+  1건만 남기고 원본은 `pending.jsonl.prev` 로 보존한다. `daemon pending`/MCP
+  조회는 path 별 최신 1건만 보므로 노출 결과는 같다. 0.6.1 에서 회전 없이 20MB
+  까지 쌓인 기존 파일도 업그레이드 후 첫 rescan 에서 압축된다.
+
+### Changed
+
+- **`pending_count` 의미 정정**: 기록할 때마다 1씩 늘기만 하던 누적값(0.6.1
+  운영에서 5,383)을, 기동 후 현재 대기 중인 고유 path 수로 바꿨다. 적용되면
+  줄어든다. 사유별 내역은 새 필드 `pending_by_reason`. rate_limited 기록 시에는
+  실제 분류가 없었으므로 `last_classified_at` 을 갱신하지 않는다.
+
+### Fixed
+
+- **low_confidence / 가드 skip 파일 재투입 차단**: 판정 당시 mtime 을 기억해
+  내용이 바뀌기 전엔 큐에 다시 넣지 않는다. 0.7.0 은 low_confidence 에 cooldown
+  이 없어 rescan(기본 300초)마다, 그리고 vault 의 .md 변경(watcher)마다 LLM 을
+  다시 불렀다. 파일당 하루 288회 이상이라 2개면 일일 한도 500 을 넘는다.
+  low_confidence 는 카테고리 목록 변화를 반영하도록 내용이 같아도 24시간마다
+  1회 재시도하고, too_short/user_locked 는 내용이 바뀔 때까지 보류한다(기존 60초
+  cooldown 대체).
+
 ## [0.7.0] - 2026-08-03
 
 프로젝트 폴더 평면 누적 문제를 해소했다. 기존 서브폴더를 분류 목적지로 학습하고

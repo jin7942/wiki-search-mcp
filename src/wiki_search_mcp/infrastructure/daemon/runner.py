@@ -7,6 +7,8 @@
 4. N개 worker가 큐에서 dequeue → LLM 분류 → confidence 분기:
    - ≥ threshold → FrontmatterWriter.apply() + applied.jsonl 기록 + 증분 reindex
    - <  threshold → pending.jsonl 기록
+   가드 skip / low_confidence 파일은 내용(mtime)이 바뀌기 전엔 재투입하지 않는다
+   (같은 본문으로 LLM 을 반복 호출해 일일 한도를 독점하는 것을 막는다).
 5. SIGTERM/SIGINT → graceful shutdown
 """
 
@@ -16,6 +18,7 @@ import asyncio
 import logging
 import signal
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,6 +75,14 @@ class DaemonRunner:
         # 같은 path가 재스캔 때마다 무한 재투입되어 pending.jsonl이 폭증하는 것을 방지.
         self._cooldown: dict[str, float] = {}
         self._cooldown_seconds: float = 600.0
+        # path → (판정 당시 mtime, 재시도 허용 monotonic 시각). 가드 skip 과
+        # low_confidence 는 같은 내용이면 결과도 같으므로 mtime 이 바뀌기 전엔
+        # 재투입하지 않는다. 시간 cooldown 만 있던 0.7.0 에선 low_confidence
+        # 파일이 rescan(300초)마다 LLM 을 재호출해 파일당 하루 288회를 썼다.
+        self._settled: dict[str, tuple[float, float]] = {}
+        # low_confidence 는 카테고리 목록·유사 문서가 바뀌면 결과가 달라질 수
+        # 있어 내용이 같아도 하루 1회는 재시도한다 (가드 skip 은 무기한).
+        self._low_confidence_retry_seconds: float = 86400.0
         # LanceDB의 ``create_table(mode="overwrite")``는 atomic이지만, 같은 시점에
         # 두 worker가 동시에 호출하면 매니페스트 버전 경쟁으로 한쪽이 실패할 수 있다.
         # post-apply reindex만 직렬화해 worker 동시성은 유지하면서 인덱스 갱신만 순차.
@@ -119,6 +130,9 @@ class DaemonRunner:
         # 사유로 rescan 마다 반복 기록되어 로그가 폭증하는 것을 막는다
         # (rate_limited 1650건 중복 사례). reason 이 바뀌면 다시 기록.
         self._pending_logged: dict[str, str] = {}
+        # pending.jsonl 이 이 크기를 넘으면 path 별 최신 1건으로 압축한다
+        # (0.6.1 운영에서 회전 없이 20MB 까지 누적된 사례).
+        self._pending_compact_bytes: int = 10 * 1024 * 1024
 
         # 구조 유지 (평면 누적 폴더 계층화 — health_check 경고의 실행 주체).
         self._hierarchizer = HierarchizationService(
@@ -174,6 +188,7 @@ class DaemonRunner:
                 "confidence_threshold": self._opts.confidence_threshold,
                 "applied_count": 0,
                 "pending_count": 0,
+                "pending_by_reason": {},
                 "error_count": 0,
                 "reindex_error_count": 0,
             }
@@ -324,7 +339,7 @@ class DaemonRunner:
                 moved = sum(1 for r in results if r.get("status") == "moved")
                 if moved:
                     applied_any = True
-                    self._pending_logged.pop(folder, None)
+                    self._clear_pending(folder)
                     self._status.increment(
                         "hierarchized_count",
                         delta=moved,
@@ -337,13 +352,12 @@ class DaemonRunner:
                     plan.confidence,
                 )
             else:
-                if self._record_pending(
+                self._record_pending(
                     folder,
                     "hierarchization",
                     plan=plan.to_dict(),
                     confidence=plan.confidence,
-                ):
-                    self._status.increment("pending_count")
+                )
                 self._structure_cooldown[folder] = (
                     now + self._structure_cooldown_seconds
                 )
@@ -395,6 +409,10 @@ class DaemonRunner:
                 last_invalidate_error=str(e),
                 last_invalidate_error_at=_utc_now(),
             )
+        self._compact_pending_if_large()
+        # 한도 사용량 노출 — 한도 소진은 오류로 집계되지 않아, 0.6.1 에선
+        # 분류가 멈춰도 상태값만으로는 알 수 없었다.
+        self._status.update(rate=self._rate.snapshot())
         # 인덱스 비어있을 수도 있음 — find_pending은 디스크 차집합도 함께 봄
         try:
             items = self._container.classification_service.find_pending(limit=200)
@@ -418,6 +436,8 @@ class DaemonRunner:
                 continue
             if rel in self._cooldown:
                 continue
+            if self._is_settled(rel, now):
+                continue
             try:
                 self._queue.put_nowait(rel)
             except asyncio.QueueFull:
@@ -426,7 +446,45 @@ class DaemonRunner:
                 self._status.increment("error_count")
                 break
 
+    def _is_settled(self, rel: str, now: float) -> bool:
+        """가드 skip / low_confidence 판정 뒤 내용이 그대로이고 재시도 시각 전이면 True.
+
+        mtime 이 바뀌었거나, 재시도 시각이 지났거나, 파일이 없으면 기록을
+        지우고 False (다시 분류 대상).
+        """
+        entry = self._settled.get(rel)
+        if entry is None:
+            return False
+        mtime, retry_at = entry
+        try:
+            unchanged = (self._container.pages_path / rel).stat().st_mtime == mtime
+        except OSError:
+            unchanged = False
+        if unchanged and now < retry_at:
+            return True
+        del self._settled[rel]
+        return False
+
     # ---------------------------------------------------------------- pending
+    def _compact_pending_if_large(self) -> None:
+        """pending.jsonl 이 상한을 넘으면 path 별 최신 1건으로 압축 (원본은 ``.prev``).
+
+        ``daemon pending`` 조회도 path 별 최신 1건만 보므로 노출 결과는 같다.
+        실패해도 rescan 은 계속하고 status 에 마지막 오류를 남긴다.
+        """
+        try:
+            if self._pending.path.stat().st_size <= self._pending_compact_bytes:
+                return
+            kept = self._pending.compact("path", backup_suffix="prev")
+            logger.info("pending.jsonl compacted to %d entries", kept)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            logger.warning("pending.jsonl compaction failed: %s", e, exc_info=True)
+            self._status.update(
+                last_compact_error=str(e), last_compact_error_at=_utc_now()
+            )
+
     def _record_pending(self, path: str, reason: str, **extra: object) -> bool:
         """pending.jsonl 에 기록. 같은 path 가 같은 reason 으로 연속 기록되면 skip.
 
@@ -439,7 +497,28 @@ class DaemonRunner:
         self._pending.append(
             {"path": path, "reason": reason, **extra, "recorded_at": _utc_now()}
         )
+        self._sync_pending_status()
         return True
+
+    def _clear_pending(self, path: str) -> None:
+        """적용 성공 — 대기에서 뺀다. 이후 다른 사유로 pending 되면 다시 기록된다."""
+        if self._pending_logged.pop(path, None) is not None:
+            self._sync_pending_status()
+
+    def _sync_pending_status(self) -> None:
+        """status 의 ``pending_count``(현재 대기 path 수)와 사유별 내역 갱신.
+
+        과거 pending_count 는 기록할 때마다 1씩 늘기만 해 0.6.1 운영에선
+        5,383 까지 쌓였다(실제 대기 파일 수와 무관). 이제는 기동 후 마지막
+        기록이 대기 사유인 고유 path 수이며, 적용되면 줄어든다.
+        """
+        # ponytail: 사용자가 지우거나 직접 옮긴 파일은 재기동 전까지 남는다
+        # (daemon pending 조회와 같은 한계). 장기 가동에서 오차가 문제되면
+        # rescan 때 디스크에 없는 path 를 정리.
+        self._status.update(
+            pending_count=len(self._pending_logged),
+            pending_by_reason=dict(Counter(self._pending_logged.values())),
+        )
 
     # ---------------------------------------------------------------- worker
     async def _worker(self, idx: int) -> None:
@@ -460,10 +539,7 @@ class DaemonRunner:
                     if e.context
                     else None
                 )
-                if self._record_pending(rel, "rate_limited", wait_seconds=wait):
-                    self._status.increment(
-                        "pending_count", last_classified_at=_utc_now()
-                    )
+                self._record_pending(rel, "rate_limited", wait_seconds=wait)
                 # 한도 회복까지 실제로 필요한 시간만큼 재시도를 미룬다. 기본
                 # 600초 cooldown 만 쓰면 일일 한도 소진(wait ≈ 수만 초) 상황에서
                 # 600초마다 헛 재시도가 반복된다.
@@ -516,8 +592,8 @@ class DaemonRunner:
             # 분류 가드(본문 너무 짧음 / 사용자 잠금)에 걸린 경우.
             # 오류가 아니므로 error_count 는 그대로 두고, pending.jsonl 에 사유만 남긴다.
             self._record_pending(rel, e.reason)
-            # 같은 파일이 다음 rescan 마다 즉시 재진입하지 않도록 짧은 cooldown.
-            self._cooldown[rel] = time.monotonic() + max(quiescence, 30.0)
+            # 결과는 내용으로만 정해지므로 파일이 바뀔 때까지 재투입하지 않는다.
+            self._settled[rel] = (mtime_before, float("inf"))
             return
 
         # 분류 도중 사용자가 파일을 수정한 경우 → 적용 안 함
@@ -530,12 +606,12 @@ class DaemonRunner:
             return
 
         if decision.confidence < self._opts.confidence_threshold:
-            if self._record_pending(
-                rel, "low_confidence", decision=decision.to_dict()
-            ):
-                self._status.increment(
-                    "pending_count", last_classified_at=_utc_now()
-                )
+            self._record_pending(rel, "low_confidence", decision=decision.to_dict())
+            self._status.update(last_classified_at=_utc_now())
+            self._settled[rel] = (
+                mtime_before,
+                time.monotonic() + self._low_confidence_retry_seconds,
+            )
             return
 
         # confidence 충족 → 자동 적용
@@ -550,8 +626,7 @@ class DaemonRunner:
             return
 
         self._applied.append(record.to_dict())
-        # 적용 성공 — 이후 같은 파일이 다른 사유로 pending 되면 다시 기록되도록 해제.
-        self._pending_logged.pop(rel, None)
+        self._clear_pending(rel)
         try:
             # 다중 worker 동시 reindex로 인한 LanceDB 매니페스트 race 방지.
             # 분류 INFO 적용 자체는 worker별로 병렬이지만, 인덱스 갱신은 순차.

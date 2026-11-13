@@ -117,3 +117,47 @@ def test_append_raises_on_unsupported_type(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError):
         log.append({"x": Unknown()})
+
+
+def test_latest_by_keeps_last_per_key_in_last_seen_order(tmp_path: Path) -> None:
+    log = JsonlLog(tmp_path / "p.jsonl")
+    for obj in ({"path": "a", "n": 1}, {"path": "b", "n": 2}, {"path": "a", "n": 3}, {"n": 4}):
+        log.append(obj)
+    assert list(log.latest_by("path").values()) == [{"path": "b", "n": 2}, {"path": "a", "n": 3}]
+
+
+def test_compact_keeps_latest_and_backs_up_original(tmp_path: Path) -> None:
+    p = tmp_path / "p.jsonl"
+    p.write_text('{"path": "a", "n": 1}\nINVALID\n{"path": "a", "n": 2}\n', encoding="utf-8")
+    log = JsonlLog(p)
+
+    assert log.compact("path", backup_suffix="prev") == 1
+
+    assert list(log.scan()) == [{"path": "a", "n": 2}]
+    assert (tmp_path / "p.jsonl.prev").read_text(encoding="utf-8").count("\n") == 3
+    assert not (tmp_path / "p.jsonl.tmp").exists()
+    log.append({"path": "b"})  # 압축 뒤에도 append 정상
+    assert [o["path"] for o in log.scan()] == ["a", "b"]
+
+
+def test_compact_when_missing(tmp_path: Path) -> None:
+    assert JsonlLog(tmp_path / "missing.jsonl").compact("path", backup_suffix="prev") == 0
+
+
+def test_compact_write_failure_leaves_original(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """압축본 쓰기가 실패하면 원본은 그대로, tmp/백업은 남지 않는다."""
+    log = JsonlLog(tmp_path / "p.jsonl")
+    log.append({"path": "a", "n": 1})
+    log.append({"path": "a", "n": 2})
+    before = log.path.read_bytes()
+
+    def _boom(fd: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("wiki_search_mcp.infrastructure.jsonl.log.os.fsync", _boom)
+    with pytest.raises(OSError):
+        log.compact("path", backup_suffix="prev")
+
+    assert log.path.read_bytes() == before
+    assert not (tmp_path / "p.jsonl.tmp").exists()
+    assert not (tmp_path / "p.jsonl.prev").exists()

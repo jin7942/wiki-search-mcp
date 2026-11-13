@@ -33,13 +33,18 @@ def _json_default(o: Any) -> Any:
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
+def _encode(obj: dict[str, Any]) -> bytes:
+    """객체 1개를 JSON Lines 한 줄(bytes, 개행 포함)로 직렬화."""
+    return json.dumps(obj, ensure_ascii=False, default=_json_default).encode("utf-8") + b"\n"
+
+
 class JsonlLog:
     """append-only JSON Lines 파일 래퍼.
 
     설계 원칙:
     - 동일 프로세스 내 동시 append는 ``threading.Lock``으로 직렬화한다.
     - 디스크 fsync는 매 append마다 수행하여 daemon 비정상 종료 시 손실 최소화.
-    - 파일 회전(rotate)은 호출자가 명시적으로 트리거한다 (자동 회전 안 함).
+    - 파일 회전(rotate)/압축(compact)은 호출자가 명시적으로 트리거한다 (자동 회전 안 함).
     - 라인 단위 파싱 실패는 ``scan()``에서 ``ValueError``를 raise하지 않고 ``skip``한다
       (오염된 라인이 전체 순회를 막지 않도록).
     """
@@ -59,7 +64,7 @@ class JsonlLog:
 
         ``ensure_ascii=False``: 한글/CJK 문자를 그대로 저장.
         """
-        line = json.dumps(obj, ensure_ascii=False, default=_json_default).encode("utf-8") + b"\n"
+        line = _encode(obj)
         with self._lock, open(self._path, "ab") as fp:
             fp.write(line)
             fp.flush()
@@ -87,6 +92,48 @@ class JsonlLog:
         # 작은 파일에서는 전체 읽기가 가장 단순. 50MB 이하 권장.
         items = list(self.scan())
         return items[-n:]
+
+    def latest_by(self, key: str) -> dict[str, dict[str, Any]]:
+        """``key`` 필드 값별 마지막 객체. 마지막으로 등장한 순서(=기록 순서)를 유지.
+
+        ``key`` 값이 문자열이 아닌 객체는 제외한다.
+        """
+        latest: dict[str, dict[str, Any]] = {}
+        for obj in self.scan():
+            k = obj.get(key)
+            if isinstance(k, str):
+                latest.pop(k, None)  # 재삽입으로 순서를 마지막 등장 위치로 옮김
+                latest[k] = obj
+        return latest
+
+    def compact(self, key: str, *, backup_suffix: str) -> int:
+        """``key`` 값별 마지막 객체만 남기도록 파일을 재작성.
+
+        압축본을 ``.tmp`` 에 fsync 까지 쓴 뒤, 원본을 ``<name>.<backup_suffix>``
+        로 보존하고(이전 백업은 덮어씀) 압축본으로 교체한다. tmp 쓰기가 실패하면
+        원본은 그대로 남는다. 같은 lock 안에서 읽고 쓰므로 압축 중 append 가
+        유실되지 않는다.
+
+        Returns:
+            남은 줄 수 (파일이 없으면 0).
+        """
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        with self._lock:
+            if not self._path.exists():
+                return 0
+            kept = list(self.latest_by(key).values())
+            try:
+                with open(tmp, "wb") as fp:
+                    for obj in kept:
+                        fp.write(_encode(obj))
+                    fp.flush()
+                    os.fsync(fp.fileno())
+            except OSError:
+                tmp.unlink(missing_ok=True)
+                raise
+            os.replace(self._path, self._path.with_name(f"{self._path.name}.{backup_suffix}"))
+            os.replace(tmp, self._path)
+        return len(kept)
 
     def rotate(self, suffix: str) -> Path | None:
         """현재 파일을 ``<name>.<suffix>``로 rename하고 새 파일 시작.

@@ -405,7 +405,10 @@ def wiki_daemon_status() -> str:
     """자동 분류 daemon의 현재 상태를 조회합니다.
 
     Returns:
-        JSON: ``{state, alive, pid, started_at, applied_count, pending_count, ...}``.
+        JSON: ``{state, alive, pid, started_at, applied_count, pending_count,
+        pending_by_reason, rate, ...}``. ``pending_count`` 는 기동 후 현재 대기 중인
+        고유 path 수(사유별 내역은 ``pending_by_reason``), ``rate`` 는 LLM 호출
+        한도 사용량(``per_day: {limit, used}`` 등 — used 가 limit 이면 분류 정지).
         daemon이 실행 중이 아니면 ``{state: not_running}``.
     """
     from wiki_search_mcp.adapters.mcp.handlers import handle_wiki_daemon_status
